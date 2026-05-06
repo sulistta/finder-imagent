@@ -361,6 +361,10 @@ export class ImageFinderJobManager {
     activateAgent(record, group, 'visual', product.sku || product.title);
     let visualCompleted = false;
     const candidateFailures: string[] = [];
+    const rejectCandidate = (failure: string) => {
+      candidateFailures.push(failure);
+      if (candidateFailures.length <= 8) productDiagnostics.push(`candidateRejected=${failure}`);
+    };
     for (const candidate of candidates) {
       try {
         const page = await group.search.extract(candidate);
@@ -371,12 +375,12 @@ export class ImageFinderJobManager {
         );
 
         if (imageCount === 0) {
-          candidateFailures.push(`${candidate.url} | sem_imagem`);
+          rejectCandidate(`${candidate.url} | sem_imagem`);
           continue;
         }
 
         if (evidence.score < LOCAL_EVIDENCE_THRESHOLD) {
-          candidateFailures.push(`${candidate.url} | evidencia_local_baixa=${evidence.score}`);
+          rejectCandidate(`${candidate.url} | evidencia_local_baixa=${evidence.score}`);
           continue;
         }
 
@@ -386,14 +390,13 @@ export class ImageFinderJobManager {
           visualCompleted = true;
           return { page, reason: validation.reason };
         }
-        candidateFailures.push(`${candidate.url} | gemini_reprovou=${truncateDiagnostic(validation.reason)}`);
+        rejectCandidate(`${candidate.url} | gemini_reprovou=${truncateDiagnostic(validation.reason)}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        candidateFailures.push(`${candidate.url} | erro=${truncateDiagnostic(message)}`);
+        rejectCandidate(`${candidate.url} | erro=${truncateDiagnostic(message)}`);
       }
     }
     if (!visualCompleted) group.activeRole = 'visual';
-    productDiagnostics.push(...candidateFailures.slice(0, 8).map((failure) => `candidateRejected=${failure}`));
     throw new Error(`No candidate clearly matched the product. ${candidateFailures.slice(0, 3).join(' || ')}`);
   }
 
