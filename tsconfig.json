@@ -22,7 +22,6 @@
 		"server/src/httpServer.ts",
 		"server/src/index.ts",
 		"server/src/jobManager.ts",
-		"server/src/pageAgentSelection.ts",
 		"server/src/types.ts",
 		"server/src/workbook.ts",
 		"shared"

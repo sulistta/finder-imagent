@@ -168,11 +168,37 @@ export function buildDeterministicQueries(product: ProductInput): string[] {
   const words = cleanName.split(/\s+/).filter(Boolean);
   const baseQuery = buildBaseSearchQuery(words);
   const codeQuery = buildCodeSearchQuery(words);
-  return unique([cleanName, baseQuery, codeQuery].filter(Boolean));
+  const fullNameQuery = shouldUseFullNameQuery(words) ? cleanName : '';
+  return unique([baseQuery, codeQuery, fullNameQuery].filter(Boolean));
+}
+
+function shouldUseFullNameQuery(words: string[]): boolean {
+  return !words.some((word, index) => {
+    const normalized = normalizeSearchText(word);
+    const nextNormalized = normalizeSearchText(words[index + 1] || '');
+    return isSearchStopTerm(normalized) || isMlVolumeToken(normalized, nextNormalized);
+  });
 }
 
 function buildBaseSearchQuery(words: string[]): string {
-  const stopAt = new Set([
+  const baseWords: string[] = [];
+
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index];
+    const normalized = normalizeSearchText(word);
+    const nextNormalized = normalizeSearchText(words[index + 1] || '');
+    if (baseWords.length >= 2 && (isSearchStopTerm(normalized) || isMlVolumeToken(normalized, nextNormalized))) {
+      break;
+    }
+    if (normalized === 'ml') break;
+    baseWords.push(word);
+  }
+
+  return baseWords.join(' ');
+}
+
+function isSearchStopTerm(normalized: string): boolean {
+  return new Set([
     'reciclado',
     'reciclada',
     'compativel',
@@ -190,26 +216,11 @@ function buildBaseSearchQuery(words: string[]): string {
     'ciano',
     'pequeno',
     'pequena',
-  ]);
-  const baseWords: string[] = [];
+  ]).has(normalized);
+}
 
-  for (let index = 0; index < words.length; index += 1) {
-    const word = words[index];
-    const normalized = normalizeSearchText(word);
-    const nextNormalized = normalizeSearchText(words[index + 1] || '');
-    if (
-      baseWords.length >= 2 &&
-      (stopAt.has(normalized) ||
-        /^\d+(?:,\d+)?ml$/i.test(normalized) ||
-        (/^\d+(?:,\d+)?$/i.test(normalized) && nextNormalized === 'ml'))
-    ) {
-      break;
-    }
-    if (normalized === 'ml') break;
-    baseWords.push(word);
-  }
-
-  return baseWords.join(' ');
+function isMlVolumeToken(normalized: string, nextNormalized: string): boolean {
+  return /^\d+(?:,\d+)?ml$/i.test(normalized) || (/^\d+(?:,\d+)?$/i.test(normalized) && nextNormalized === 'ml');
 }
 
 function buildCodeSearchQuery(words: string[]): string {

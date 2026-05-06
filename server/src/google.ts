@@ -1,11 +1,6 @@
 import { type Browser, type BrowserContext, chromium, type Page } from 'playwright';
 
-import {
-  type PageAgentSelectionOptions,
-  resolvePageAgentBundlePath,
-  selectCandidatesWithPageAgent,
-} from './pageAgentSelection.js';
-import type { ApiKeyConfig, ExtractedPage, ModelConfig, ProductInput, SearchCandidate } from './types.js';
+import type { ExtractedPage, ProductInput, SearchCandidate } from './types.js';
 
 const BLOCKED_HOST_PATTERNS = [
   /(^|\.)google\./i,
@@ -24,7 +19,7 @@ const BLOCKED_HOST_PATTERNS = [
 const IMAGE_EXTENSIONS = /\.(avif|gif|jpe?g|png|svg|webp)(\?|#|$)/i;
 
 export interface SearchProvider {
-  search(product: ProductInput, queries: string[]): Promise<SearchCandidate[]>;
+  searchQuery(product: ProductInput, query: string): Promise<SearchCandidate[]>;
   extract(candidate: SearchCandidate): Promise<ExtractedPage>;
   close(): Promise<void>;
 }
@@ -33,59 +28,23 @@ export class GooglePlaywrightSearchProvider implements SearchProvider {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private googlePage: Page | null = null;
-  private readonly pageAgentBundlePath: string;
 
   constructor(
     private readonly options: {
       headless: boolean;
       maxCandidatesPerQuery: number;
-      apiKey: ApiKeyConfig;
-      models: ModelConfig;
       onManualAction?: (action: { type: 'google-captcha'; active: boolean; url: string }) => void;
-      onCandidateSelectionStart?: () => void;
-      pageAgentSelector?: (options: PageAgentSelectionOptions) => Promise<SearchCandidate[]>;
     },
-  ) {
-    this.pageAgentBundlePath = resolvePageAgentBundlePath();
-  }
+  ) {}
 
-  async search(product: ProductInput, queries: string[]): Promise<SearchCandidate[]> {
+  async searchQuery(_product: ProductInput, query: string): Promise<SearchCandidate[]> {
     const page = await this.googleSearchPage();
-    const candidates: SearchCandidate[] = [];
-    for (const query of queries) {
-      const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=pt-BR&gl=br&num=10&pws=0`;
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-      await waitForGoogleCaptchaIfPresent(page, this.options.onManualAction);
-      await dismissGoogleConsent(page);
-      await page.waitForTimeout(750);
-      const pageCandidates = normalizeSearchCandidates(await collectGoogleCandidates(page)).slice(
-        0,
-        this.options.maxCandidatesPerQuery,
-      );
-      if (pageCandidates.length === 0) continue;
-
-      try {
-        const selector = this.options.pageAgentSelector ?? selectCandidatesWithPageAgent;
-        this.options.onCandidateSelectionStart?.();
-        const selected = await selector({
-          page,
-          product,
-          query,
-          candidates: pageCandidates,
-          apiKey: this.options.apiKey,
-          models: this.options.models,
-          bundlePath: this.pageAgentBundlePath,
-        });
-        candidates.push(...selected);
-      } catch (error) {
-        console.warn(
-          `[Image Finder] PageAgent candidate selection failed for SKU ${product.sku || product.title}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-    }
-    return normalizeSearchCandidates(candidates);
+    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=pt-BR&gl=br&num=10&pws=0`;
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await waitForGoogleCaptchaIfPresent(page, this.options.onManualAction);
+    await dismissGoogleConsent(page);
+    await page.waitForTimeout(750);
+    return normalizeSearchCandidates(await collectGoogleCandidates(page)).slice(0, this.options.maxCandidatesPerQuery);
   }
 
   async extract(candidate: SearchCandidate): Promise<ExtractedPage> {

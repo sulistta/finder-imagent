@@ -9,8 +9,8 @@ import type {
 } from './types.js';
 
 export interface AiProvider {
-  generateQueries(product: ProductInput, deterministicQueries: string[]): Promise<string[]>;
-  rankCandidates(product: ProductInput, candidates: SearchCandidate[]): Promise<SearchCandidate[]>;
+  generateQueries(product: ProductInput, allowedQueries: string[]): Promise<string[]>;
+  selectCandidates(product: ProductInput, query: string, candidates: SearchCandidate[]): Promise<SearchCandidate[]>;
   validateProduct(product: ProductInput, page: ExtractedPage): Promise<VisualValidation>;
   generateMetadata(
     product: ProductInput,
@@ -25,32 +25,54 @@ export class GeminiAiProvider implements AiProvider {
     private readonly models: ModelConfig,
   ) {}
 
-  async generateQueries(product: ProductInput, deterministicQueries: string[]): Promise<string[]> {
+  async generateQueries(product: ProductInput, allowedQueries: string[]): Promise<string[]> {
     const model = requireModel(this.models.query, 'GEMINI_QUERY_MODEL');
     const response = await callGeminiJson<{ queries?: string[] }>(this.apiKey.key, model, [
-      `Gere ate ${deterministicQueries.length} buscas Google naturais em pt-BR para encontrar imagem e pagina do produto.`,
+      `Escolha e ordene ate ${allowedQueries.length} buscas Google naturais em pt-BR para encontrar imagem e pagina do produto.`,
       `Produto: SKU ${product.sku}; nome ${product.title}; categoria ${product.category || 'n/a'}.`,
-      `Use estas buscas deterministicas como base e preserve codigos/modelos importantes: ${JSON.stringify(deterministicQueries)}.`,
-      'Responda JSON: {"queries":["termo 1","termo 2"]}.',
+      `Use somente buscas desta lista permitida, sem criar termos novos: ${JSON.stringify(allowedQueries)}.`,
+      'Responda somente JSON no formato {"queries":["termo"]}. Cada item de queries deve ser copia exata de uma busca permitida.',
     ]);
-    return normalizeQueries(response.queries ?? []);
+    return normalizeAllowedQueries(response.queries ?? [], allowedQueries);
   }
 
-  async rankCandidates(product: ProductInput, candidates: SearchCandidate[]): Promise<SearchCandidate[]> {
-    if (candidates.length <= 1) return candidates;
+  async selectCandidates(product: ProductInput, query: string, candidates: SearchCandidate[]): Promise<SearchCandidate[]> {
+    if (candidates.length === 0) return [];
     const model = requireModel(this.models.ranking, 'GEMINI_RANKING_MODEL');
-    const response = await callGeminiJson<{ urls?: string[] }>(this.apiKey.key, model, [
-      `Escolha as URLs mais provaveis para o produto. SKU: ${product.sku}. Nome: ${product.title}.`,
-      JSON.stringify(candidates.map(({ url, title, snippet }) => ({ url, title, snippet }))),
-      'Responda JSON: {"urls":["https://..."]}.',
+    const response = await callGeminiJson<{ candidatos?: Array<{ href?: string; motivo?: string }> }>(this.apiKey.key, model, [
+      'Selecione apenas resultados organicos realmente relevantes para o produto procurado.',
+      `Produto: SKU ${product.sku}; nome ${product.title}; categoria ${product.category || 'n/a'}.`,
+      `Query usada no Google: ${query}.`,
+      JSON.stringify({
+        candidatosDisponiveis: candidates.map((candidate, index) => ({
+          index: index + 1,
+          href: candidate.url,
+          texto: [candidate.title, candidate.snippet].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 900),
+        })),
+      }),
+      'Responda somente JSON no formato {"candidatos":[{"href":"...","motivo":"..."}]}. Nao invente URLs. Cada href deve ser exatamente um href de candidatosDisponiveis. Se nenhum parecer relacionado, retorne lista vazia.',
     ]);
-    const requested = response.urls ?? [];
+    const requested = response.candidatos ?? [];
     const byUrl = new Map(candidates.map((candidate) => [candidate.url, candidate]));
-    const ranked = requested.map((url) => byUrl.get(url)).filter((candidate): candidate is SearchCandidate => Boolean(candidate));
-    return ranked.length > 0 ? [...ranked, ...candidates.filter((candidate) => !requested.includes(candidate.url))] : candidates;
+    const selected = new Set<string>();
+    return requested.flatMap((item) => {
+      const url = typeof item.href === 'string' ? item.href : '';
+      const candidate = byUrl.get(url);
+      if (!candidate || selected.has(candidate.url)) return [];
+      selected.add(candidate.url);
+      const reason = typeof item.motivo === 'string' ? item.motivo.replace(/\s+/g, ' ').trim() : '';
+      return [{ ...candidate, ...(reason ? { reason } : {}) }];
+    });
   }
 
   async validateProduct(product: ProductInput, page: ExtractedPage): Promise<VisualValidation> {
+    const conflictingVariant = findConflictingModelVariant(product, page);
+    if (conflictingVariant) {
+      return {
+        approved: false,
+        reason: `A pagina indica variante/modelo diferente (${conflictingVariant}) sem correspondencia exata clara.`,
+      };
+    }
     const model = requireModel(this.models.visual, 'GEMINI_VISUAL_MODEL');
     const response = await callGeminiJson<{ approved?: boolean; reason?: string }>(this.apiKey.key, model, [
       `Valide se a pagina corresponde claramente ao produto. SKU: ${product.sku}. Nome: ${product.title}.`,
@@ -62,7 +84,7 @@ export class GeminiAiProvider implements AiProvider {
         text: page.text.slice(0, 1_500),
         images: page.images.slice(0, 8),
       }),
-      'Responda JSON: {"approved":true,"reason":"..."}. Aprove somente correspondencia clara.',
+      'Responda somente JSON no formato {"approved":true,"reason":"..."}. Aprove somente correspondencia clara de identificadores, modelo/codigo e produto. Rejeite variantes como XL se o produto solicitado nao tiver essa variante.',
     ]);
     return {
       approved: response.approved === true,
@@ -86,12 +108,16 @@ export class GeminiAiProvider implements AiProvider {
         metaDescription: page.metaDescription,
         text: page.text.slice(0, 2_000),
       }),
-      'Campos JSON permitidos: description, category, seoTitle, seoDescription, seoKeywords.',
+      'Responda somente JSON. Campos permitidos: description, category, seoTitle, seoDescription, seoKeywords.',
     ]);
   }
 }
 
-async function callGeminiJson<T>(apiKey: string, model: string, textParts: string[]): Promise<T> {
+export async function callGeminiJson<T>(
+  apiKey: string,
+  model: string,
+  textParts: string[],
+): Promise<T> {
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
     {
@@ -99,7 +125,9 @@ async function callGeminiJson<T>(apiKey: string, model: string, textParts: strin
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ role: 'user', parts: textParts.map((text) => ({ text })) }],
-        generationConfig: { responseMimeType: 'application/json' },
+        generationConfig: {
+          responseMimeType: 'application/json',
+        },
       }),
     },
   );
@@ -110,7 +138,7 @@ async function callGeminiJson<T>(apiKey: string, model: string, textParts: strin
     candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
   };
   const text = payload.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '{}';
-  return JSON.parse(text) as T;
+  return parseGeminiJson<T>(text);
 }
 
 function requireModel(model: string, envName: string): string {
@@ -120,14 +148,82 @@ function requireModel(model: string, envName: string): string {
   return model;
 }
 
-function normalizeQueries(queries: string[]): string[] {
+function normalizeAllowedQueries(queries: string[], allowedQueries: string[]): string[] {
+  const byNormalized = new Map(allowedQueries.map((query) => [normalizeQueryKey(query), query]));
   const seen = new Set<string>();
   const normalized: string[] = [];
   for (const query of queries) {
-    const clean = query.replace(/\s+/g, ' ').trim();
-    if (!clean || clean.length > 140 || seen.has(clean)) continue;
-    seen.add(clean);
-    normalized.push(clean);
+    const allowed = byNormalized.get(normalizeQueryKey(query));
+    if (!allowed || seen.has(allowed)) continue;
+    seen.add(allowed);
+    normalized.push(allowed);
   }
   return normalized;
+}
+
+function normalizeQueryKey(query: string): string {
+  return query.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function findConflictingModelVariant(product: ProductInput, page: ExtractedPage): string | null {
+  const productTokens = tokenizeModelText(product.title);
+  const pageTokens = tokenizeModelText([page.title, page.h1, page.metaDescription, page.text].join(' '));
+  const pageTokenSet = new Set(pageTokens);
+
+  for (const token of productTokens) {
+    if (!/\d/.test(token) || token.length < 2) continue;
+    if (pageTokenSet.has(token)) continue;
+    const conflict = pageTokens.find((pageToken) => pageToken.startsWith(token) && pageToken.length > token.length);
+    if (conflict) return conflict.toUpperCase();
+  }
+  return null;
+}
+
+function tokenizeModelText(text: string): string[] {
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .match(/[a-z]*\d+[a-z0-9]*/g) ?? [];
+}
+
+function parseGeminiJson<T>(text: string): T {
+  const jsonText = extractFirstJsonObject(text);
+  try {
+    return JSON.parse(jsonText) as T;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const preview = text.replace(/\s+/g, ' ').trim().slice(0, 140);
+    throw new Error(`${message}; response preview=${JSON.stringify(preview)}`);
+  }
+}
+
+function extractFirstJsonObject(text: string): string {
+  const start = text.indexOf('{');
+  if (start < 0) return text;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+  return text;
 }

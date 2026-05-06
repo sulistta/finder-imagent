@@ -94,7 +94,6 @@ export interface ModelConfig {
   ranking: string;
   visual: string;
   metadata: string;
-  baseUrl: string;
 }
 
 export interface GoogleRuntimeConfig {

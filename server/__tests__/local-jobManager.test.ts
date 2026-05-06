@@ -98,10 +98,113 @@ describe('ImageFinderJobManager', () => {
     await waitForCompletion(manager, status.id);
     expect(delays).toEqual([2_345]);
   });
+
+  it('keeps query and ranking diagnostics when a later visual stage fails', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'image-finder-'));
+    const preview = await previewWorkbook({ rootDir }, await fixtureWorkbookBuffer(), 'fixture.xlsx');
+    const manager = createManager({
+      store: { rootDir },
+      apiKeys: [{ id: 'key-1', label: 'Google 1 (key:****)', key: 'secret-1' }],
+      aiFactory: () => new VisualRejectingAiProvider(),
+    });
+
+    const { status } = await manager.startJob(jobConfig(preview.workbookId));
+
+    await waitForCompletion(manager, status.id);
+    const record = manager.getJob(status.id)!;
+    expect(record.results[0]).toMatchObject({
+      sku: 'SKU-1',
+      status: 'failed',
+      diagnostics: expect.arrayContaining([
+        'queries=1',
+        'queryModel=1',
+        'serpCandidates=1',
+        'selectedCandidates=1',
+        'No candidate clearly matched the product.',
+      ]),
+    });
+  });
+
+  it('runs agents in strict query, ranking, visual, metadata order', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'image-finder-'));
+    const preview = await previewWorkbook({ rootDir }, await fixtureWorkbookBuffer(), 'fixture.xlsx');
+    const events: string[] = [];
+    const manager = createManager({
+      store: { rootDir },
+      apiKeys: [{ id: 'key-1', label: 'Google 1 (key:****)', key: 'secret-1' }],
+      aiFactory: () => new RecordingAiProvider(events),
+      searchProviderFactory: () => new RecordingSearchProvider(events),
+    });
+
+    const { status } = await manager.startJob(jobConfig(preview.workbookId));
+
+    await waitForCompletion(manager, status.id);
+    expect(events).toEqual(['query', 'ranking:search', 'ranking:select', 'visual', 'metadata']);
+  });
+
+  it('fails in query stage without searching Google when query generation fails', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'image-finder-'));
+    const preview = await previewWorkbook({ rootDir }, await fixtureWorkbookBuffer(), 'fixture.xlsx');
+    let searched = false;
+    const manager = createManager({
+      store: { rootDir },
+      apiKeys: [{ id: 'key-1', label: 'Google 1 (key:****)', key: 'secret-1' }],
+      aiFactory: () => new QueryFailingAiProvider(),
+      searchProviderFactory: () => ({
+        async searchQuery(): Promise<SearchCandidate[]> {
+          searched = true;
+          return [];
+        },
+        async extract(candidate: SearchCandidate): Promise<ExtractedPage> {
+          return new MockSearchProvider().extract(candidate);
+        },
+        async close(): Promise<void> {},
+      }),
+    });
+
+    const { status } = await manager.startJob(jobConfig(preview.workbookId));
+
+    await waitForCompletion(manager, status.id);
+    const record = manager.getJob(status.id)!;
+    expect(searched).toBe(false);
+    expect(record.results[0]).toMatchObject({
+      sku: 'SKU-1',
+      status: 'failed',
+      validationReason: 'query model unavailable',
+    });
+    expect(record.agents.find((agent) => agent.role === 'query')).toMatchObject({
+      state: 'error',
+      lastError: 'query model unavailable',
+    });
+    expect(record.agents.find((agent) => agent.role === 'ranking')?.counts.completed).toBe(0);
+  });
+
+  it('uses deterministic safe queries when query model returns no allowed query', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'image-finder-'));
+    const preview = await previewWorkbook({ rootDir }, await fixtureWorkbookBuffer(), 'fixture.xlsx');
+    const searchedQueries: string[] = [];
+    const manager = createManager({
+      store: { rootDir },
+      apiKeys: [{ id: 'key-1', label: 'Google 1 (key:****)', key: 'secret-1' }],
+      aiFactory: () => new QueryNoAllowedOutputAiProvider(),
+      searchProviderFactory: () => new RecordingQuerySearchProvider(searchedQueries),
+    });
+
+    const { status } = await manager.startJob(jobConfig(preview.workbookId));
+
+    await waitForCompletion(manager, status.id);
+    const record = manager.getJob(status.id)!;
+    expect(searchedQueries).toEqual(['Printer toner']);
+    expect(record.results[0]).toMatchObject({
+      sku: 'SKU-1',
+      status: 'completed',
+      diagnostics: expect.arrayContaining(['queryModelNoAllowedOutput=true', 'deterministicQueries=1']),
+    });
+  });
 });
 
 class MockSearchProvider implements SearchProvider {
-  async search(_product: ProductInput, _queries: string[]): Promise<SearchCandidate[]> {
+  async searchQuery(_product: ProductInput, _query: string): Promise<SearchCandidate[]> {
     return [{ url: 'https://shop.test/product', title: 'Product', snippet: 'Snippet' }];
   }
 
@@ -125,7 +228,7 @@ class MockAiProvider implements AiProvider {
     return deterministicQueries;
   }
 
-  async rankCandidates(_product: ProductInput, candidates: SearchCandidate[]): Promise<SearchCandidate[]> {
+  async selectCandidates(_product: ProductInput, _query: string, candidates: SearchCandidate[]): Promise<SearchCandidate[]> {
     return candidates;
   }
 
@@ -135,6 +238,72 @@ class MockAiProvider implements AiProvider {
 
   async generateMetadata(): Promise<{ description: string }> {
     return { description: 'Generated metadata' };
+  }
+}
+
+class VisualRejectingAiProvider extends MockAiProvider {
+  async validateProduct(): Promise<{ approved: boolean; reason: string }> {
+    return { approved: false, reason: 'not enough evidence' };
+  }
+}
+
+class RecordingSearchProvider extends MockSearchProvider {
+  constructor(private readonly events: string[]) {
+    super();
+  }
+
+  async searchQuery(product: ProductInput, query: string): Promise<SearchCandidate[]> {
+    this.events.push('ranking:search');
+    return super.searchQuery(product, query);
+  }
+}
+
+class RecordingQuerySearchProvider extends MockSearchProvider {
+  constructor(private readonly queries: string[]) {
+    super();
+  }
+
+  async searchQuery(product: ProductInput, query: string): Promise<SearchCandidate[]> {
+    this.queries.push(query);
+    return super.searchQuery(product, query);
+  }
+}
+
+class RecordingAiProvider extends MockAiProvider {
+  constructor(private readonly events: string[]) {
+    super();
+  }
+
+  async generateQueries(product: ProductInput, deterministicQueries: string[]): Promise<string[]> {
+    this.events.push('query');
+    return super.generateQueries(product, deterministicQueries);
+  }
+
+  async selectCandidates(product: ProductInput, query: string, candidates: SearchCandidate[]): Promise<SearchCandidate[]> {
+    this.events.push('ranking:select');
+    return super.selectCandidates(product, query, candidates);
+  }
+
+  async validateProduct(): Promise<{ approved: boolean; reason: string }> {
+    this.events.push('visual');
+    return super.validateProduct();
+  }
+
+  async generateMetadata(): Promise<{ description: string }> {
+    this.events.push('metadata');
+    return super.generateMetadata();
+  }
+}
+
+class QueryFailingAiProvider extends MockAiProvider {
+  async generateQueries(): Promise<string[]> {
+    throw new Error('query model unavailable');
+  }
+}
+
+class QueryNoAllowedOutputAiProvider extends MockAiProvider {
+  async generateQueries(): Promise<string[]> {
+    return [];
   }
 }
 
@@ -148,7 +317,6 @@ function createManager(
       ranking: 'ranking-model',
       visual: 'visual-model',
       metadata: 'metadata-model',
-      baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     },
     googleHeadless: true,
     google: {

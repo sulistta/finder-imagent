@@ -63,7 +63,7 @@ describe('workbook pipeline helpers', () => {
     expect(sheet.getRow(2).getCell(5).value).toBe('Generated description');
   });
 
-  it('builds legacy-style Google queries from full name, truncated base, and model code', () => {
+  it('builds Google queries from safe base, code, and only clean full names', () => {
     expect(
       buildDeterministicQueries({
         rowNumber: 2,
@@ -72,7 +72,7 @@ describe('workbook pipeline helpers', () => {
         existingImages: [],
         emptyMetadataFields: [],
       }),
-    ).toEqual(['Toner HP 85A CE285A Compatível Preto 100ml', 'Toner HP 85A CE285A', 'HP 85A']);
+    ).toEqual(['Toner HP 85A CE285A', 'HP 85A']);
     expect(
       buildDeterministicQueries({
         rowNumber: 3,
@@ -81,7 +81,16 @@ describe('workbook pipeline helpers', () => {
         existingImages: [],
         emptyMetadataFields: [],
       }),
-    ).toEqual(['Cartucho Epson T544 100 ml', 'Cartucho Epson T544', 'Epson T544']);
+    ).toEqual(['Cartucho Epson T544', 'Epson T544']);
+    expect(
+      buildDeterministicQueries({
+        rowNumber: 4,
+        sku: 'SKU-3',
+        title: 'Toner Brother TN3472',
+        existingImages: [],
+        emptyMetadataFields: [],
+      }),
+    ).toEqual(['Toner Brother TN3472', 'Brother TN3472']);
   });
 });
 

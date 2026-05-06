@@ -197,29 +197,22 @@ export class ImageFinderJobManager {
           new GooglePlaywrightSearchProvider({
             headless: this.options.googleHeadless,
             maxCandidatesPerQuery: this.options.google.maxCandidatesPerQuery,
-            apiKey,
-            models: this.options.models,
             onManualAction: (action) => {
-              const queryAgent = group.agents.query;
+              const activeRole = group.activeRole ?? 'ranking';
+              const activeAgent = group.agents[activeRole];
               if (action.active) {
-                queryAgent.manualAction = {
+                activeAgent.manualAction = {
                   type: 'google-captcha',
                   message: 'Resolva o CAPTCHA no navegador aberto para continuar.',
                   url: action.url,
                 };
-                queryAgent.state = 'blocked';
-                emitAgent(record, queryAgent, 'captcha');
+                activeAgent.state = 'blocked';
+                emitAgent(record, activeAgent, 'captcha');
                 return;
               }
-              queryAgent.manualAction = null;
-              if (group.activeRole === 'query') queryAgent.state = 'active';
-              emitAgent(record, queryAgent, 'query');
-            },
-            onCandidateSelectionStart: () => {
-              if (group.activeRole === 'query') {
-                completeAgentStage(record, group.agents.query);
-                activateAgent(record, group, 'ranking', group.agents.query.activeProduct);
-              }
+              activeAgent.manualAction = null;
+              if (group.activeRole === activeRole) activeAgent.state = 'active';
+              emitAgent(record, activeAgent, activeRole);
             },
           }),
         agents: groupAgents,
@@ -249,21 +242,22 @@ export class ImageFinderJobManager {
   private async processProduct(record: JobRecord, group: ModelAgentGroup, product: ProductInput): Promise<void> {
     const productLabel = product.sku || product.title;
     let activeAgent = group.agents.query;
+    const productDiagnostics: string[] = [];
     activateAgent(record, group, 'query', productLabel);
 
     try {
-      const deterministicQueries = buildDeterministicQueries(product).slice(0, this.options.google.maxQueries);
-      const { queries, diagnostics } = await this.generateQueries(group, product, deterministicQueries);
-      const candidates = await group.search.search(product, queries);
-      if (group.activeRole === 'query') {
-        completeAgentStage(record, group.agents.query);
-        activateAgent(record, group, 'ranking', productLabel);
-      }
+      const allowedQueries = buildDeterministicQueries(product).slice(0, this.options.google.maxQueries);
+      const { queries, diagnostics } = await this.generateQueries(group, product, allowedQueries);
+      productDiagnostics.push(`queries=${queries.length}`, ...diagnostics);
+      completeAgentStage(record, group.agents.query);
+
       activeAgent = group.agents.ranking;
-      const ranked = await group.ai.rankCandidates(product, candidates);
-      completeAgentStage(record, group.agents.ranking);
+      activateAgent(record, group, 'ranking', productLabel);
       const limit = record.config.limits?.maxCandidatesPerProduct ?? 5;
-      const selected = ranked.slice(0, limit);
+      const { selected, diagnostics: rankingDiagnostics } = await this.selectRankedCandidates(group, product, queries, limit);
+      productDiagnostics.push(...rankingDiagnostics);
+      completeAgentStage(record, group.agents.ranking);
+
       activeAgent = group.agents.visual;
       const result = await this.validateCandidates(record, group, product, selected);
 
@@ -278,7 +272,7 @@ export class ImageFinderJobManager {
         metadata,
         sourceUrl: result.page.url,
         validationReason: result.reason,
-        diagnostics: [`queries=${queries.length}`, `candidates=${candidates.length}`, ...diagnostics],
+        diagnostics: productDiagnostics,
       };
       record.results.push(productResult);
       record.status.totals.completed += 1;
@@ -293,7 +287,7 @@ export class ImageFinderJobManager {
         images: [],
         metadata: {},
         validationReason: message,
-        diagnostics: [message],
+        diagnostics: [...productDiagnostics, message],
       };
       record.results.push(productResult);
       activeAgent.counts.failed += 1;
@@ -311,22 +305,57 @@ export class ImageFinderJobManager {
   private async generateQueries(
     group: ModelAgentGroup,
     product: ProductInput,
-    deterministicQueries: string[],
+    allowedQueries: string[],
   ): Promise<{ queries: string[]; diagnostics: string[] }> {
-    try {
-      const generated = await group.ai.generateQueries(product, deterministicQueries);
-      const queries = mergeQueries(generated, deterministicQueries).slice(0, this.options.google.maxQueries);
+    if (allowedQueries.length === 0) {
+      throw new Error('No deterministic Google queries could be built for the product.');
+    }
+    const generated = await group.ai.generateQueries(product, allowedQueries);
+    const queries = generated.slice(0, this.options.google.maxQueries);
+    if (queries.length === 0) {
       return {
-        queries,
-        diagnostics: generated.length > 0 ? [`queryModel=${generated.length}`] : ['queryFallback=empty'],
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        queries: deterministicQueries,
-        diagnostics: [`queryFallback=${message}`],
+        queries: allowedQueries.slice(0, this.options.google.maxQueries),
+        diagnostics: ['queryModelNoAllowedOutput=true', `deterministicQueries=${allowedQueries.length}`],
       };
     }
+    return {
+      queries,
+      diagnostics: [`queryModel=${generated.length}`],
+    };
+  }
+
+  private async selectRankedCandidates(
+    group: ModelAgentGroup,
+    product: ProductInput,
+    queries: string[],
+    limit: number,
+  ): Promise<{ selected: SearchCandidate[]; diagnostics: string[] }> {
+    const selected: SearchCandidate[] = [];
+    const selectedUrls = new Set<string>();
+    let serpCandidates = 0;
+
+    for (const query of queries) {
+      const candidates = await group.search.searchQuery(product, query);
+      serpCandidates += candidates.length;
+      if (candidates.length === 0) continue;
+
+      const ranked = await group.ai.selectCandidates(product, query, candidates);
+      for (const candidate of ranked) {
+        if (selectedUrls.has(candidate.url)) continue;
+        selectedUrls.add(candidate.url);
+        selected.push(candidate);
+        if (selected.length >= limit) break;
+      }
+      if (selected.length >= limit) break;
+    }
+
+    if (selected.length === 0) {
+      throw new Error('Ranking selected no Google candidates.');
+    }
+    return {
+      selected,
+      diagnostics: [`serpCandidates=${serpCandidates}`, `selectedCandidates=${selected.length}`],
+    };
   }
 
   private async validateCandidates(
@@ -461,18 +490,6 @@ function clearGroupAgents(record: JobRecord, group: ModelAgentGroup): void {
     agent.manualAction = null;
     emitAgent(record, agent, 'idle');
   }
-}
-
-function mergeQueries(generated: string[], deterministic: string[]): string[] {
-  const seen = new Set<string>();
-  const merged: string[] = [];
-  for (const query of [...generated, ...deterministic]) {
-    const clean = query.replace(/\s+/g, ' ').trim();
-    if (!clean || seen.has(clean)) continue;
-    seen.add(clean);
-    merged.push(clean);
-  }
-  return merged;
 }
 
 function modelForRole(role: ModelAgentRole, models: ModelConfig): string {

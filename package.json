@@ -1,7 +1,7 @@
 {
   "name": "localhost-image-finder",
   "displayName": "Localhost Image Finder",
-  "description": "Local workbook image finder with Google API-key workers and a pixel office progress view",
+  "description": "Local workbook image finder with Google API-key model agents and a pixel office progress view",
   "version": "0.1.0",
   "repository": {
     "type": "git",
@@ -20,8 +20,8 @@
     "package": "npm run check-types && npm run lint && node esbuild.js --production && npm run build:webview",
     "check-types": "tsc --noEmit && tsc --noEmit -p server/tsconfig.test.json",
     "prepare": "husky",
-    "lint": "eslint server/src/env.ts server/src/gemini.ts server/src/google.ts server/src/httpServer.ts server/src/index.ts server/src/jobManager.ts server/src/pageAgentSelection.ts server/src/types.ts server/src/workbook.ts server/__tests__/local-*.test.ts shared && cd webview-ui && npm run lint",
-    "lint:fix": "eslint server/src/env.ts server/src/gemini.ts server/src/google.ts server/src/httpServer.ts server/src/index.ts server/src/jobManager.ts server/src/pageAgentSelection.ts server/src/types.ts server/src/workbook.ts server/__tests__/local-*.test.ts shared --fix && cd webview-ui && npm run lint -- --fix",
+    "lint": "eslint server/src/env.ts server/src/gemini.ts server/src/google.ts server/src/httpServer.ts server/src/index.ts server/src/jobManager.ts server/src/types.ts server/src/workbook.ts server/__tests__/local-*.test.ts shared && cd webview-ui && npm run lint",
+    "lint:fix": "eslint server/src/env.ts server/src/gemini.ts server/src/google.ts server/src/httpServer.ts server/src/index.ts server/src/jobManager.ts server/src/types.ts server/src/workbook.ts server/__tests__/local-*.test.ts shared --fix && cd webview-ui && npm run lint -- --fix",
     "import-tileset": "tsx scripts/import-tileset-cli.ts",
     "format": "prettier --write \"src/**/*.ts\" \"server/**/*.ts\" \"shared/**/*.ts\" \"webview-ui/src/**/*.{ts,tsx,css}\" \"*.{js,mjs}\" \"webview-ui/*.{js,ts}\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"server/**/*.ts\" \"shared/**/*.ts\" \"webview-ui/src/**/*.{ts,tsx,css}\" \"*.{js,mjs}\" \"webview-ui/*.{js,ts}\"",
@@ -32,7 +32,6 @@
   },
   "dependencies": {
     "exceljs": "^4.4.0",
-    "page-agent": "^1.8.1",
     "playwright": "^1.58.2"
   },
   "devDependencies": {

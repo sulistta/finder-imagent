@@ -27,7 +27,7 @@
     "019dfbb5-cf21-7a60-a462-0dc859168bb1": {
       "session_id": "019dfbb5-cf21-7a60-a462-0dc859168bb1",
       "leader_thread_id": "019dfbb5-cf21-7a60-a462-0dc859168bb1",
-      "updated_at": "2026-05-06T06:55:15.135Z",
+      "updated_at": "2026-05-06T07:40:06.272Z",
       "threads": {
         "019dfbb5-cf21-7a60-a462-0dc859168bb1": {
           "thread_id": "019dfbb5-cf21-7a60-a462-0dc859168bb1",
@@ -41,9 +41,24 @@
           "thread_id": "019dfbd7-ce4a-7832-b81d-f7de6689c468",
           "kind": "subagent",
           "first_seen_at": "2026-05-06T06:08:46.154Z",
-          "last_seen_at": "2026-05-06T06:55:15.135Z",
-          "last_turn_id": "019dfc10-e8bf-7c53-bfd7-d5484ca066ac",
-          "turn_count": 4
+          "last_seen_at": "2026-05-06T07:40:06.272Z",
+          "last_turn_id": "019dfc35-02dc-7693-af02-3d804253346c",
+          "turn_count": 9
+        }
+      }
+    },
+    "019dfbd7-ce4a-7832-b81d-f7de6689c468": {
+      "session_id": "019dfbd7-ce4a-7832-b81d-f7de6689c468",
+      "leader_thread_id": "019dfbd7-ce4a-7832-b81d-f7de6689c468",
+      "updated_at": "2026-05-06T08:10:08.655Z",
+      "threads": {
+        "019dfbd7-ce4a-7832-b81d-f7de6689c468": {
+          "thread_id": "019dfbd7-ce4a-7832-b81d-f7de6689c468",
+          "kind": "leader",
+          "first_seen_at": "2026-05-06T08:10:08.655Z",
+          "last_seen_at": "2026-05-06T08:10:08.655Z",
+          "last_turn_id": "019dfc3c-46e2-7ed1-9e3f-9af1c1006b0d",
+          "turn_count": 1
         }
       }
     }

@@ -24,8 +24,7 @@ import {
   isCheckpointProductComplete,
   loadEnv,
   readProducts,
-  resolvePageAgentBundlePath,
-  selectRelevantCandidatesWithPageAgent,
+  selectRelevantCandidatesWithGemini,
   validateProductMatchWithGemini,
   writeJsonAtomic,
 } from "./main.js";
@@ -34,7 +33,6 @@ const DEFAULT_INPUT_FILE = "resultado.xlsx";
 const DEFAULT_OUTPUT_FILE = "resultado-fill-verified-google.xlsx";
 const DEFAULT_CHECKPOINT_FILE = "google-missing-image-checkpoint.json";
 const CHECKPOINT_VERSION = 2;
-const DEFAULT_GOOGLE_WORKER_COUNT = 1;
 const DEFAULT_GOOGLE_MAX_QUERIES = 6;
 const DEFAULT_GOOGLE_MAX_CANDIDATES_PER_QUERY = 5;
 const GOOGLE_TARGET_IMAGE_COUNT = 4;
@@ -77,13 +75,8 @@ async function main({
     DEFAULT_CHECKPOINT_FILE;
   const apiKeys = buildGeminiApiKeys();
   const { clickConfig, matchConfig } = buildGeminiConfigs(apiKeys);
-  const pageAgentBundlePath = resolvePageAgentBundlePath();
   const timeouts = buildTimeoutConfig();
   const geminiRetryConfig = buildGeminiRetryConfig();
-  const workerCount = readPositiveInt(
-    process.env.GOOGLE_WORKER_COUNT,
-    DEFAULT_GOOGLE_WORKER_COUNT,
-  );
   const limit = readPositiveInt(process.env.GOOGLE_MISSING_LIMIT, 0);
 
   if (apiKeys.length === 0) {
@@ -137,7 +130,7 @@ async function main({
   }
 
   console.log(
-    `Google missing fill: ${pendingProducts.length} pendente(s) de ${selectedTargets.length} produto(s) com menos de ${GOOGLE_TARGET_IMAGE_COUNT} imagens | workers=${Math.min(workerCount, pendingProducts.length)}`,
+    `Google missing fill: ${pendingProducts.length} pendente(s) de ${selectedTargets.length} produto(s) com menos de ${GOOGLE_TARGET_IMAGE_COUNT} imagens`,
   );
 
   const browser = await chromium.launch({ headless: false });
@@ -147,7 +140,7 @@ async function main({
 
   try {
     context = await createBrowserContext(browser);
-    await runGoogleWorkers({
+    await runGoogleProducts({
       context,
       products: pendingProducts,
       state,
@@ -156,8 +149,6 @@ async function main({
       matchGeminiConfig: matchConfig,
       timeouts,
       geminiRetryConfig,
-      pageAgentBundlePath,
-      workerCount,
       captchaPrompt,
     });
 
@@ -170,7 +161,7 @@ async function main({
   }
 }
 
-async function runGoogleWorkers({
+async function runGoogleProducts({
   context,
   products,
   state,
@@ -179,51 +170,29 @@ async function runGoogleWorkers({
   matchGeminiConfig,
   timeouts,
   geminiRetryConfig,
-  pageAgentBundlePath,
-  workerCount,
   captchaPrompt,
 }) {
-  const activeWorkerCount = Math.min(workerCount, products.length);
-  let nextProductIndex = 0;
-  const nextProduct = () => {
-    if (nextProductIndex >= products.length) return null;
-    const product = products[nextProductIndex];
-    nextProductIndex += 1;
-    return product;
-  };
-
-  await Promise.all(
-    Array.from({ length: activeWorkerCount }, async (_, index) => {
-      const workerId = index + 1;
-      const page = await context.newPage();
-      try {
-        while (true) {
-          const product = nextProduct();
-          if (!product) break;
-
-          await processGoogleProduct({
-            workerId,
-            page,
-            product,
-            state,
-            startedAt,
-            geminiConfig,
-            matchGeminiConfig,
-            timeouts,
-            geminiRetryConfig,
-            pageAgentBundlePath,
-            captchaPrompt,
-          });
-        }
-      } finally {
-        await page.close().catch(() => {});
-      }
-    }),
-  );
+  const page = await context.newPage();
+  try {
+    for (const product of products) {
+      await processGoogleProduct({
+        page,
+        product,
+        state,
+        startedAt,
+        geminiConfig,
+        matchGeminiConfig,
+        timeouts,
+        geminiRetryConfig,
+        captchaPrompt,
+      });
+    }
+  } finally {
+    await page.close().catch(() => {});
+  }
 }
 
 async function processGoogleProduct({
-  workerId,
   page,
   product,
   state,
@@ -232,12 +201,11 @@ async function processGoogleProduct({
   matchGeminiConfig,
   timeouts,
   geminiRetryConfig,
-  pageAgentBundlePath,
   captchaPrompt,
 }) {
   const progress = formatProgress(state.processedSkus.size, state.total);
   console.log(
-    `[Google Worker ${workerId}] Buscando SKU ${product.sku} "${product.nome}" | Progresso: ${progress}`,
+    `[Google] Buscando SKU ${product.sku} "${product.nome}" | Progresso: ${progress}`,
   );
 
   const result = await searchGoogleProduct({
@@ -247,7 +215,6 @@ async function processGoogleProduct({
     matchGeminiConfig,
     timeouts,
     geminiRetryConfig,
-    pageAgentBundlePath,
     captchaPrompt,
   });
 
@@ -261,7 +228,7 @@ async function processGoogleProduct({
       at: result.updatedAt,
     };
     console.log(
-      `[Google Worker ${workerId}] SKU ${product.sku} pendente: ${result.erro || result.status}`,
+      `[Google] SKU ${product.sku} pendente: ${result.erro || result.status}`,
     );
     await saveGoogleProgress(state, false);
     return;
@@ -272,7 +239,7 @@ async function processGoogleProduct({
   state.processedSkus.add(product.sku);
 
   console.log(
-    `[Google Worker ${workerId}] SKU ${product.sku} sucesso: ${result.imagens.length} imagem(ns)`,
+    `[Google] SKU ${product.sku} sucesso: ${result.imagens.length} imagem(ns)`,
   );
   await saveGoogleProgress(state, state.completedThisRun % 10 === 0);
   console.log(
@@ -287,7 +254,6 @@ async function searchGoogleProduct({
   matchGeminiConfig,
   timeouts,
   geminiRetryConfig,
-  pageAgentBundlePath,
   captchaPrompt,
 }) {
   page.setDefaultTimeout(timeouts.navigationTimeoutMs);
@@ -349,7 +315,7 @@ async function searchGoogleProduct({
     let relevantCandidates = [];
     let suggestedQueries = [];
     try {
-      const clickResult = await selectRelevantCandidatesWithPageAgent({
+      const clickResult = await selectRelevantCandidatesWithGemini({
         page,
         store: GOOGLE_STORE,
         product,
@@ -359,20 +325,19 @@ async function searchGoogleProduct({
         geminiConfig,
         timeouts,
         geminiRetryConfig,
-        pageAgentBundlePath,
         allowSuggestions: isFirstQuery && !suggestionsCollected,
       });
       relevantCandidates = clickResult.candidates || [];
       suggestedQueries = clickResult.suggestedQueries || [];
     } catch (error) {
-      queryDiagnostic.event = "pageagent_candidate_selection_erro";
+      queryDiagnostic.event = "gemini_candidate_selection_erro";
       queryDiagnostic.erroTecnico = error.message;
       continue;
     }
 
     queryDiagnostic.relevantCandidatesSelected = relevantCandidates.length;
     if (relevantCandidates.length === 0) {
-      queryDiagnostic.event = "pageagent_sem_escolha";
+      queryDiagnostic.event = "gemini_sem_escolha";
       if (isFirstQuery && !suggestionsCollected && suggestedQueries.length > 0) {
         suggestionsCollected = true;
         for (const suggested of suggestedQueries) {

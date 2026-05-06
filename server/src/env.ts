@@ -25,7 +25,6 @@ export function loadServerEnv(cwd = process.cwd()): ServerEnv {
       ranking: process.env.GEMINI_RANKING_MODEL || '',
       visual: process.env.GEMINI_VISUAL_MODEL || '',
       metadata: process.env.GEMINI_METADATA_MODEL || '',
-      baseUrl: process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai',
     },
     google: {
       delayMinMs: readNonNegativeInt(process.env.GOOGLE_DELAY_MIN_MS, 2_000),

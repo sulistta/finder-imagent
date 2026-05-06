@@ -15,38 +15,17 @@ const OUTPUT_FILE = "resultado.xlsx";
 const DEFAULT_STORE_HARD_TIMEOUT_MS = 300_000;
 const DEFAULT_NAVIGATION_TIMEOUT_MS = 20_000;
 const DEFAULT_PAGE_SETTLE_MS = 1_000;
-const DEFAULT_PAGE_AGENT_CLICK_TIMEOUT_MS = 25_000;
 const DEFAULT_GEMINI_MATCH_TIMEOUT_MS = 25_000;
 const DEFAULT_GEMINI_RETRY_ATTEMPTS = 3;
 const DEFAULT_GEMINI_RETRY_BASE_DELAY_MS = 1_000;
 const DEFAULT_GEMINI_RETRY_MAX_DELAY_MS = 8_000;
 const MIN_DELAY_MS = 2_000;
 const MAX_DELAY_MS = 5_000;
-const DEFAULT_GEMINI_BASE_URL =
-  "https://generativelanguage.googleapis.com/v1beta/openai";
+const DEFAULT_GEMINI_NATIVE_BASE_URL =
+  "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_GEMINI_MODEL = "gemma-4-31b-it";
 const DEFAULT_GEMINI_MATCH_MODEL = "gemini-3.1-flash-lite-preview";
-const GEMINI_MATCH_RESPONSE_SCHEMA = {
-  type: "object",
-  properties: {
-    aprovado: { type: "boolean" },
-    motivo: { type: "string" },
-  },
-  required: ["aprovado", "motivo"],
-};
-const GEMINI_DESCRIPTION_RESPONSE_SCHEMA = {
-  type: "object",
-  properties: {
-    descricao: { type: "string" },
-    categoria: { type: "string" },
-    tituloSeo: { type: "string" },
-    descricaoSeo: { type: "string" },
-    palavrasChaveSeo: { type: "string" },
-  },
-  required: ["descricao", "categoria", "tituloSeo", "descricaoSeo", "palavrasChaveSeo"],
-};
 const CHECKPOINT_VERSION = 2;
-const WORKER_COUNT = 2;
 const MAX_CANDIDATES_PER_QUERY = 3;
 const MAX_QUERIES_PER_STORE = 6;
 const MAX_AGENT_SUGGESTED_QUERIES = 2;
@@ -101,7 +80,6 @@ const REQUIRED_INPUT_COLUMNS = [
   DESCRIPTION_COLUMN,
   ...IMAGE_COLUMNS,
 ];
-const PAGE_AGENT_BRIDGE_STATE = new WeakMap();
 if (isCliEntrypoint()) {
   main().catch((error) => {
     console.error(`Erro fatal: ${error.message}`);
@@ -169,8 +147,6 @@ async function main() {
     );
     return;
   }
-
-  const pageAgentBundlePath = resolvePageAgentBundlePath();
   const browser = await chromium.launch({ headless: false });
   const startedAt = Date.now();
   const state = {
@@ -184,14 +160,14 @@ async function main() {
   };
 
   console.log(
-    `Iniciando busca: ${pendingProducts.length} pendentes de ${products.length} produtos | workers=${Math.min(WORKER_COUNT, pendingProducts.length)}`,
+    `Iniciando busca: ${pendingProducts.length} pendentes de ${products.length} produtos`,
   );
 
   let context = null;
 
   try {
     context = await createBrowserContext(browser);
-    await runProductWorkers({
+    await runProductsSequentially({
       context,
       products: pendingProducts,
       state,
@@ -200,7 +176,6 @@ async function main() {
       matchGeminiConfig: matchConfig,
       timeouts,
       geminiRetryConfig,
-      pageAgentBundlePath,
     });
 
     await saveProgress(state, true);
@@ -272,7 +247,7 @@ function buildGeminiConfigs(apiKeys, env = process.env) {
   const normalizedApiKeys = normalizeGeminiApiKeys(apiKeys);
   const keyRotator = createGeminiKeyRotator(normalizedApiKeys);
   const baseURL = normalizeBaseUrl(
-    env.GEMINI_BASE_URL || DEFAULT_GEMINI_BASE_URL,
+    DEFAULT_GEMINI_NATIVE_BASE_URL,
   );
   const nativeBaseURL = deriveNativeGeminiBaseURL(baseURL);
   return {
@@ -296,7 +271,7 @@ function buildGeminiConfigs(apiKeys, env = process.env) {
 }
 
 function deriveNativeGeminiBaseURL(baseURL) {
-  const normalized = normalizeBaseUrl(baseURL || DEFAULT_GEMINI_BASE_URL);
+  const normalized = normalizeBaseUrl(baseURL || DEFAULT_GEMINI_NATIVE_BASE_URL);
   return normalized.replace(/\/openai$/i, "");
 }
 
@@ -316,10 +291,6 @@ function buildTimeoutConfig(env = process.env) {
     pageSettleMs: readDurationMs(env.PAGE_SETTLE_MS, DEFAULT_PAGE_SETTLE_MS, {
       allowZero: true,
     }),
-    pageAgentClickTimeoutMs: readDurationMs(
-      env.PAGE_AGENT_CLICK_TIMEOUT_MS,
-      DEFAULT_PAGE_AGENT_CLICK_TIMEOUT_MS,
-    ),
     geminiMatchTimeoutMs: readDurationMs(
       env.GEMINI_MATCH_TIMEOUT_MS,
       DEFAULT_GEMINI_MATCH_TIMEOUT_MS,
@@ -478,20 +449,6 @@ function isCheckpointProductComplete(result) {
   );
 }
 
-function resolvePageAgentBundlePath() {
-  const entryPath = require.resolve("page-agent");
-  const bundlePath = path.resolve(
-    path.dirname(entryPath),
-    "../iife/page-agent.demo.js",
-  );
-  if (!existsSync(bundlePath)) {
-    throw new Error(
-      `Bundle IIFE do page-agent nao encontrado em ${bundlePath}. Rode npm install.`,
-    );
-  }
-  return bundlePath;
-}
-
 async function createBrowserContext(browser) {
   return await browser.newContext({
     locale: "pt-BR",
@@ -522,7 +479,7 @@ async function resetStorePage(context, storePages, storeName, page) {
   return replacement;
 }
 
-async function runProductWorkers({
+async function runProductsSequentially({
   context,
   products,
   state,
@@ -531,8 +488,6 @@ async function runProductWorkers({
   matchGeminiConfig = geminiConfig,
   timeouts = buildTimeoutConfig(),
   geminiRetryConfig = buildGeminiRetryConfig(),
-  pageAgentBundlePath,
-  workerCount = WORKER_COUNT,
   productProcessor = processProduct,
   storePagesFactory = createStorePages,
   storePagesCloser = closeStorePages,
@@ -540,55 +495,32 @@ async function runProductWorkers({
   delayBetweenProducts = sleep,
   randomDelayMs = () => randomInt(MIN_DELAY_MS, MAX_DELAY_MS),
 }) {
-  const activeWorkerCount = Math.min(workerCount, products.length);
-  if (activeWorkerCount <= 0) return;
-
-  let nextProductIndex = 0;
-  const nextProduct = () => {
-    if (nextProductIndex >= products.length) return null;
-    const product = products[nextProductIndex];
-    nextProductIndex += 1;
-    return product;
-  };
+  if (products.length === 0) return;
   const serialProgressSaver = createSerialProgressSaver(progressSaver);
+  const storePages = await storePagesFactory(context);
 
-  const workers = Array.from(
-    { length: activeWorkerCount },
-    async (_, index) => {
-      const workerId = index + 1;
-      const storePages = await storePagesFactory(context, workerId);
+  try {
+    for (let index = 0; index < products.length; index += 1) {
+      await productProcessor({
+        context,
+        storePages,
+        product: products[index],
+        state,
+        startedAt,
+        geminiConfig,
+        matchGeminiConfig,
+        timeouts,
+        geminiRetryConfig,
+        progressSaver: serialProgressSaver,
+      });
 
-      try {
-        while (true) {
-          const product = nextProduct();
-          if (!product) break;
-
-          await productProcessor({
-            workerId,
-            context,
-            storePages,
-            product,
-            state,
-            startedAt,
-            geminiConfig,
-            matchGeminiConfig,
-            timeouts,
-            geminiRetryConfig,
-            pageAgentBundlePath,
-            progressSaver: serialProgressSaver,
-          });
-
-          if (nextProductIndex < products.length) {
-            await delayBetweenProducts(randomDelayMs());
-          }
-        }
-      } finally {
-        await storePagesCloser(storePages);
+      if (index < products.length - 1) {
+        await delayBetweenProducts(randomDelayMs());
       }
-    },
-  );
-
-  await Promise.all(workers);
+    }
+  } finally {
+    await storePagesCloser(storePages);
+  }
 }
 
 function createSerialProgressSaver(progressSaver = saveProgress) {
@@ -603,7 +535,6 @@ function createSerialProgressSaver(progressSaver = saveProgress) {
 
 async function processProduct(options) {
   const {
-    workerId,
     context,
     storePages,
     product,
@@ -613,15 +544,14 @@ async function processProduct(options) {
     matchGeminiConfig = geminiConfig,
     timeouts = buildTimeoutConfig(),
     geminiRetryConfig = buildGeminiRetryConfig(),
-    pageAgentBundlePath,
     storeSearcher = searchStore,
     matchValidator = validateProductMatchWithGemini,
-    clickSelector = selectRelevantCandidatesWithPageAgent,
+    clickSelector = selectRelevantCandidatesWithGemini,
     progressSaver = saveProgress,
   } = options;
   const progress = formatProgress(state.completed, state.total);
   console.log(
-    `[Worker ${workerId}] 🔍 ${product.sku} - Buscando "${product.nome}" | Progresso: ${progress}`,
+    `[Busca] ${product.sku} - Buscando "${product.nome}" | Progresso: ${progress}`,
   );
 
   const fixedImageRule = findFixedRecycledImageRule(product);
@@ -630,7 +560,7 @@ async function processProduct(options) {
   if (fixedImageRule) {
     storeResults = buildFixedRecycledImageStoreResults(product, fixedImageRule);
     console.log(
-      `[Worker ${workerId}] ${product.sku} - ${FIXED_RECYCLED_IMAGE_SOURCE}: usando imagem fixa de ${fixedImageRule.type} sem buscar lojas`,
+      `[Busca] ${product.sku} - ${FIXED_RECYCLED_IMAGE_SOURCE}: usando imagem fixa de ${fixedImageRule.type} sem buscar lojas`,
     );
   } else {
     storeResults = [];
@@ -644,7 +574,6 @@ async function processProduct(options) {
         matchGeminiConfig,
         timeouts,
         geminiRetryConfig,
-        pageAgentBundlePath,
         matchValidator,
         clickSelector,
       });
@@ -670,7 +599,7 @@ async function processProduct(options) {
   for (const result of storeResults) {
     if (result.status === "erro" && result.errorType === "timeout") {
       console.log(
-        `[Worker ${workerId}] ✗ ${product.sku} - Timeout na ${result.loja}, pulando...`,
+        `[Busca] ✗ ${product.sku} - Timeout na ${result.loja}, pulando...`,
       );
     }
   }
@@ -681,7 +610,7 @@ async function processProduct(options) {
   const selectedImages = selectBestImages(storeResults);
   const hasSuccess = selectedImages.length > 0;
   console.log(
-    `[Worker ${workerId}] ${hasSuccess ? "✓" : "✗"} ${product.sku} - ${summary} | selecionadas=${selectedImages.length}`,
+    `[Busca] ${hasSuccess ? "✓" : "✗"} ${product.sku} - ${summary} | selecionadas=${selectedImages.length}`,
   );
 
   state.completedThisRun += 1;
@@ -702,7 +631,7 @@ async function processProduct(options) {
       storeResults,
     });
     console.log(
-      `[Worker ${workerId}] ${product.sku} - ${erro} SKU nao sera marcado como concluido no checkpoint.`,
+      `[Busca] ${product.sku} - ${erro} SKU nao sera marcado como concluido no checkpoint.`,
     );
     await progressSaver(state, false);
     console.log(
@@ -875,7 +804,6 @@ async function searchStore({
   matchGeminiConfig,
   timeouts = buildTimeoutConfig(),
   geminiRetryConfig = buildGeminiRetryConfig(),
-  pageAgentBundlePath,
   matchValidator,
   clickSelector,
 }) {
@@ -892,7 +820,6 @@ async function searchStore({
       matchGeminiConfig,
       timeouts,
       geminiRetryConfig,
-      pageAgentBundlePath,
       matchValidator,
       clickSelector,
     });
@@ -929,9 +856,8 @@ async function searchStoreWithPage({
   matchGeminiConfig = geminiConfig,
   timeouts = buildTimeoutConfig(),
   geminiRetryConfig = buildGeminiRetryConfig(),
-  pageAgentBundlePath,
   matchValidator = validateProductMatchWithGemini,
-  clickSelector = selectRelevantCandidatesWithPageAgent,
+  clickSelector = selectRelevantCandidatesWithGemini,
 }) {
   page.setDefaultTimeout(timeouts.navigationTimeoutMs);
   page.setDefaultNavigationTimeout(timeouts.navigationTimeoutMs);
@@ -1017,7 +943,7 @@ async function searchStoreWithPage({
       if (uniqueSearchCandidates.length > 0) {
         queryDiagnostic.event = "todos_candidatos_ja_rejeitados";
         console.log(
-          `[PageAgent Candidates] ${product.sku} ${store.name} -> query "${query}" trouxe apenas candidato(s) ja rejeitado(s)`,
+          `[Gemini Candidates] ${product.sku} ${store.name} -> query "${query}" trouxe apenas candidato(s) ja rejeitado(s)`,
         );
       } else {
         queryDiagnostic.event = "sem_candidatos_extraidos";
@@ -1037,11 +963,10 @@ async function searchStoreWithPage({
         geminiConfig,
         timeouts,
         geminiRetryConfig,
-        pageAgentBundlePath,
         allowSuggestions: isFirstQuery && !suggestionsCollected,
       });
     } catch (error) {
-      const failure = operationFailure(error, "pageagent_candidate_selection");
+      const failure = operationFailure(error, "gemini_candidate_selection");
       queryDiagnostic.event = failure.reason;
       queryDiagnostic.timeoutStage = failure.timeoutStage;
       queryDiagnostic.erroTecnico = failure.message;
@@ -1051,7 +976,7 @@ async function searchStoreWithPage({
       normalizeClickSelectorResult(clickResult, candidates, rejectedCandidates);
     queryDiagnostic.relevantCandidatesSelected = relevantCandidates.length;
     if (relevantCandidates.length === 0) {
-      queryDiagnostic.event = "pageagent_sem_escolha";
+      queryDiagnostic.event = "gemini_sem_escolha";
       if (isFirstQuery && !suggestionsCollected && suggestedQueries.length > 0) {
         suggestionsCollected = true;
         for (const suggested of suggestedQueries) {
@@ -1362,10 +1287,10 @@ function classifyStoreFailure(diagnostico) {
   }
   if (
     (diagnostico.queries || []).some(
-      (item) => item.event === "pageagent_sem_escolha",
+      (item) => item.event === "gemini_sem_escolha",
     )
   ) {
-    return "pageagent_sem_escolha";
+    return "gemini_sem_escolha";
   }
   if (
     (diagnostico.queries || []).length > 0 &&
@@ -1404,7 +1329,7 @@ function classifyProductImageFailure(storeResults) {
   ) {
     return "sem_resultado_lojas";
   }
-  if (causes.includes("pageagent_sem_escolha")) return "pageagent_sem_escolha";
+  if (causes.includes("gemini_sem_escolha")) return "gemini_sem_escolha";
   if (causes.includes("gemini_reprovou_todos")) return "gemini_reprovou_todos";
   return causes[0] || "sem_imagem_validada";
 }
@@ -1500,17 +1425,14 @@ async function extractDeterministicProductData({
   });
 }
 
-async function selectRelevantCandidatesWithPageAgent({
-  page,
+async function selectRelevantCandidatesWithGemini({
   store,
   product,
   query,
   candidates,
   rejectedCandidates,
   geminiConfig,
-  timeouts = buildTimeoutConfig(),
   geminiRetryConfig = buildGeminiRetryConfig(),
-  pageAgentBundlePath,
   allowSuggestions = false,
 }) {
   const availableCandidates = candidates.filter(
@@ -1518,27 +1440,20 @@ async function selectRelevantCandidatesWithPageAgent({
   );
   if (availableCandidates.length === 0) return { candidates: [], suggestedQueries: [] };
 
-  await installPageAgentBridge(page, store, product, geminiConfig, {
-    retryConfig: geminiRetryConfig,
-  });
-  await injectPageAgent(page, pageAgentBundlePath);
-
-  const payload = await withTimeout(
-    executePageAgentTask({
-      page,
-      geminiConfig,
-      task: buildClickSelectionPrompt({
-        product,
-        store,
-        query,
-        candidates: availableCandidates,
-        rejectedCandidates,
-        allowSuggestions,
-      }),
+  const payload = await callGeminiStructuredJson({
+    geminiConfig,
+    prompt: buildClickSelectionPrompt({
+      product,
+      store,
+      query,
+      candidates: availableCandidates,
+      rejectedCandidates,
+      allowSuggestions,
     }),
-    timeouts.pageAgentClickTimeoutMs,
-    `Timeout PageAgent de ${timeouts.pageAgentClickTimeoutMs / 1000}s ao selecionar anuncios`,
-  );
+    retryConfig: geminiRetryConfig,
+    product,
+    store,
+  });
   const selectedCandidates = normalizeRelevantCandidateSelection(
     payload,
     availableCandidates,
@@ -1549,11 +1464,11 @@ async function selectRelevantCandidatesWithPageAgent({
   if (selectedCandidates.length === 0) {
     if (suggestedQueries.length > 0) {
       console.log(
-        `[PageAgent Candidates] ${product.sku} ${store.name} -> nenhum candidato relevante, sugestões: ${JSON.stringify(suggestedQueries)}`,
+        `[Gemini Candidates] ${product.sku} ${store.name} -> nenhum candidato relevante, sugestões: ${JSON.stringify(suggestedQueries)}`,
       );
     } else {
       console.log(
-        `[PageAgent Candidates] ${product.sku} ${store.name} -> nenhum candidato relevante`,
+        `[Gemini Candidates] ${product.sku} ${store.name} -> nenhum candidato relevante`,
       );
     }
     return { candidates: [], suggestedQueries };
@@ -1563,121 +1478,9 @@ async function selectRelevantCandidatesWithPageAgent({
     .map((candidate) => candidate.href)
     .join(" | ");
   console.log(
-    `[PageAgent Candidates] ${product.sku} ${store.name} -> selecionados=${selectedCandidates.length}: ${selectedUrls}`,
+    `[Gemini Candidates] ${product.sku} ${store.name} -> selecionados=${selectedCandidates.length}: ${selectedUrls}`,
   );
   return { candidates: selectedCandidates, suggestedQueries: [] };
-}
-
-async function executePageAgentTask({ page, geminiConfig, task }) {
-  const agentResult = await page.evaluate(
-    async ({ task, apiKey, baseURL, model }) => {
-      if (!window.PageAgent) {
-        throw new Error("PageAgent nao foi carregado na pagina.");
-      }
-
-      window.__productSearchAgent?.dispose?.();
-      window.pageAgent?.dispose?.();
-
-      const agent = new window.PageAgent({
-        model,
-        baseURL,
-        apiKey,
-        language: "pt-BR",
-        enableMask: false,
-        promptForNextTask: false,
-        maxSteps: 1,
-        stepDelay: 0.2,
-        customFetch: async (url, options = {}) => {
-          const headers =
-            options.headers instanceof Headers
-              ? Object.fromEntries(options.headers.entries())
-              : options.headers;
-          const response = await window.__pageAgentFetch({
-            url,
-            method: options.method,
-            headers,
-            body: options.body,
-          });
-          return new Response(response.body, {
-            status: response.status,
-            statusText: response.statusText,
-            headers: response.headers,
-          });
-        },
-        transformRequestBody: (body) => {
-          const nextBody = { ...body };
-          delete nextBody.reasoning_effort;
-          return nextBody;
-        },
-      });
-
-      window.__productSearchAgent = agent;
-      const result = await agent.execute(task);
-      agent.dispose?.();
-      window.__productSearchAgent = null;
-      return { success: result.success, data: result.data };
-    },
-    {
-      task,
-      apiKey: geminiConfig.apiKey,
-      baseURL: geminiConfig.baseURL,
-      model: geminiConfig.model,
-    },
-  );
-
-  return parseAgentPayload(agentResult.data);
-}
-
-async function installPageAgentBridge(
-  page,
-  store,
-  product,
-  geminiConfig,
-  { retryConfig = buildGeminiRetryConfig() } = {},
-) {
-  let bindingState = PAGE_AGENT_BRIDGE_STATE.get(page);
-  if (bindingState) {
-    Object.assign(bindingState, { store, product, geminiConfig, retryConfig });
-    return;
-  }
-
-  bindingState = { store, product, geminiConfig, retryConfig };
-  PAGE_AGENT_BRIDGE_STATE.set(page, bindingState);
-
-  await page.exposeBinding("__pageAgentFetch", async (_source, request) => {
-    const current = PAGE_AGENT_BRIDGE_STATE.get(page) || bindingState;
-    const startedAt = Date.now();
-    const result = await fetchGeminiWithRetry(
-      {
-        url: request.url,
-        method: request.method || "GET",
-        headers: request.headers || {},
-        body: request.body,
-        geminiConfig: current.geminiConfig,
-        authMode: "openai",
-      },
-      current.retryConfig,
-      {
-        product: current.product,
-        store: current.store,
-      },
-    );
-    const contentType = result.headers["content-type"] || "";
-    const elapsedMs = Date.now() - startedAt;
-    const url = redactGeminiSecrets(request.url, current.geminiConfig);
-    const preview = result.body.slice(0, 220).replace(/\s+/g, " ");
-
-    console.log(
-      `[Gemini] ${current.product.sku} ${current.store.name} ${request.method || "GET"} ${url} -> ${result.status} ${result.statusText} | ${result.body.length} bytes | ${contentType} | ${elapsedMs}ms${result.ok ? "" : ` | ${preview}`}`,
-    );
-
-    return {
-      status: result.status,
-      statusText: result.statusText,
-      headers: result.headers,
-      body: result.body,
-    };
-  });
 }
 
 async function fetchGeminiWithRetry(request, retryConfig, context = {}) {
@@ -2586,18 +2389,6 @@ function isAllowedKabumImageSize(url) {
   }
 }
 
-async function injectPageAgent(page, bundlePath) {
-  await page.addScriptTag({ path: bundlePath });
-  await page.waitForFunction(() => Boolean(window.PageAgent), null, {
-    timeout: 5_000,
-  });
-  await page.waitForTimeout(150);
-  await page.evaluate(() => {
-    window.pageAgent?.dispose?.();
-    window.pageAgent = null;
-  });
-}
-
 function buildSearchQueries(name) {
   const cleanName = cleanText(name);
   const words = cleanName.split(/\s+/).filter(Boolean);
@@ -2906,7 +2697,7 @@ function normalizeRelevantCandidateSelection(
     selectedCandidates.push({
       ...selected,
       href: normalizeCandidateHref(selected.href),
-      motivo: cleanText(item?.motivo) || "Selecionado pelo PageAgent.",
+      motivo: cleanText(item?.motivo) || "Selecionado pelo Gemini.",
     });
     selectedKeys.add(key);
   }
@@ -3058,7 +2849,6 @@ ${pageText.slice(0, 30000)}`;
       },
       systemInstruction: "Você é um especialista em SEO e e-commerce que retorna dados estruturados em JSON.",
       prompt,
-      schema: GEMINI_DESCRIPTION_RESPONSE_SCHEMA,
       temperature: 0.1,
       retryConfig,
       product,
@@ -3115,7 +2905,6 @@ async function validateProductMatchWithGemini({
         prompt,
         imageAttachments,
       }),
-      schema: GEMINI_MATCH_RESPONSE_SCHEMA,
       temperature: 0,
       retryConfig,
       product,
@@ -3202,7 +2991,6 @@ async function callGeminiStructuredJson(
     prompt,
     parts = null,
     systemInstruction = "",
-    schema,
     temperature = 0,
     retryConfig = buildGeminiRetryConfig(),
     product = null,
@@ -3210,7 +2998,7 @@ async function callGeminiStructuredJson(
   },
 ) {
   const nativeBaseURL = geminiConfig.nativeBaseURL ||
-    deriveNativeGeminiBaseURL(geminiConfig.baseURL || DEFAULT_GEMINI_BASE_URL);
+    deriveNativeGeminiBaseURL(geminiConfig.baseURL || DEFAULT_GEMINI_NATIVE_BASE_URL);
   const body = {
     contents: [
       {
@@ -3221,7 +3009,6 @@ async function callGeminiStructuredJson(
     generationConfig: {
       temperature,
       responseMimeType: "application/json",
-      responseJsonSchema: schema,
     },
   };
   if (systemInstruction) {
@@ -3261,7 +3048,7 @@ async function callGeminiStructuredJson(
   }
 
   try {
-    return JSON.parse(content);
+    return JSON.parse(extractJsonObject(content));
   } catch (error) {
     throw new Error(`JSON Gemini invalido: ${error.message}`);
   }
@@ -3274,241 +3061,34 @@ function extractGeminiNativeText(response) {
     .trim();
 }
 
-function parseAgentPayload(rawData) {
-  const text = String(rawData || "").trim();
-  if (!text) throw new Error("PageAgent retornou resposta vazia.");
-
-  const withoutFence = text
-    .replace(/^```(?:json)?/i, "")
-    .replace(/```$/i, "")
-    .trim();
-  const jsonText = extractJsonObject(withoutFence);
-  return JSON.parse(jsonText);
-}
-
 function extractJsonObject(text) {
   const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error(`Resposta nao contem JSON valido: ${text.slice(0, 120)}`);
-  }
-  return text.slice(start, end + 1);
-}
-
-function buildStoreResult({
-  product,
-  store,
-  status,
-  titulo = "",
-  url = "",
-  imagens = [],
-  descricao = "",
-  errorType = null,
-  matchValidation = null,
-  diagnostico = null,
-}) {
-  return {
-    sku: product.sku,
-    nome_buscado: product.nome,
-    loja: store.name,
-    titulo_encontrado: titulo,
-    url_anuncio: url,
-    imagens,
-    descricao,
-    status,
-    imageCount: imagens.length,
-    errorType,
-    matchValidation,
-    diagnostico,
-  };
-}
-
-async function saveProgress(state, writeResultFile) {
-  const checkpoint = {
-    version: CHECKPOINT_VERSION,
-    processedSkus: [...state.processedSkus],
-    products: state.results,
-    technicalFailures: state.technicalFailures,
-    total: state.total,
-    completed: state.processedSkus.size,
-    updatedAt: new Date().toISOString(),
-  };
-  await writeJsonAtomic(CHECKPOINT_FILE, checkpoint);
-
-  if (writeResultFile) {
-    await writeResults(state.inputFile, state.results);
-  }
-}
-
-async function writeJsonAtomic(filePath, data) {
-  const tempPath = `${filePath}.tmp`;
-  await fs.writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-  await fs.rename(tempPath, filePath);
-}
-
-async function writeResults(inputFile, resultsBySku) {
-  const workbook = new ExcelJS.Workbook();
-  const sourceWorkbook = new ExcelJS.Workbook();
-  await sourceWorkbook.xlsx.readFile(inputFile);
-  const sourceWorksheet = sourceWorkbook.worksheets[0];
-  const sourceHeaders = sourceWorksheet.getRow(1).values.slice(1);
-  const columnByHeader = buildColumnIndex(sourceHeaders);
-
-  workbook.creator = "products-page-agent";
-  workbook.created = new Date();
-  const worksheet = workbook.addWorksheet(sourceWorksheet.name);
-  worksheet.views = sourceWorksheet.views;
-  worksheet.autoFilter = sourceWorksheet.autoFilter;
-  worksheet.properties = { ...sourceWorksheet.properties };
-  worksheet.pageSetup = { ...sourceWorksheet.pageSetup };
-  worksheet.columns = sourceHeaders.map((header, index) => ({
-    header,
-    key: `col_${index + 1}`,
-    width: sourceWorksheet.getColumn(index + 1).width,
-    hidden: sourceWorksheet.getColumn(index + 1).hidden,
-    style: cloneStyle(sourceWorksheet.getColumn(index + 1).style),
-  }));
-  copyRowFormat(sourceWorksheet.getRow(1), worksheet.getRow(1));
-
-  for (
-    let rowNumber = 2;
-    rowNumber <= sourceWorksheet.rowCount;
-    rowNumber += 1
-  ) {
-    const sourceRow = sourceWorksheet.getRow(rowNumber);
-    const values = [];
-    for (let column = 1; column <= sourceHeaders.length; column += 1) {
-      values.push(sourceRow.getCell(column).value ?? "");
+  if (start < 0) return text;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
     }
-
-    const sku = String(
-      sourceRow.getCell(columnByHeader.get("Código (SKU)")).value ?? "",
-    ).trim();
-    const result = resultsBySku[sku];
-
-    // Limpar as imagens originais para todos os produtos
-    for (let index = 0; index < IMAGE_COLUMNS.length; index += 1) {
-      const column = columnByHeader.get(IMAGE_COLUMNS[index]);
-      if (column) values[column - 1] = "";
+    if (char === "\"") {
+      inString = true;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
     }
-
-    if (isCheckpointProductComplete(result)) {
-      for (let index = 0; index < IMAGE_COLUMNS.length; index += 1) {
-        const column = columnByHeader.get(IMAGE_COLUMNS[index]);
-        if (column) values[column - 1] = result.imagens[index] || "";
-      }
-
-      const md = result.metadadosGerados || {};
-      
-      const descFinal = md.descricao || result.descricaoGerada;
-      if (descFinal) {
-        const col = columnByHeader.get(DESCRIPTION_COLUMN);
-        if (col) values[col - 1] = descFinal;
-      }
-      if (md.categoria) {
-        const col = columnByHeader.get(CATEGORIA_COLUMN);
-        if (col) values[col - 1] = md.categoria;
-      }
-      if (md.tituloSeo) {
-        const col = columnByHeader.get(TITULO_SEO_COLUMN);
-        if (col) values[col - 1] = md.tituloSeo;
-      }
-      if (md.descricaoSeo) {
-        const col = columnByHeader.get(DESCRICAO_SEO_COLUMN);
-        if (col) values[col - 1] = md.descricaoSeo;
-      }
-      if (md.palavrasChaveSeo) {
-        const col = columnByHeader.get(PALAVRAS_CHAVE_SEO_COLUMN);
-        if (col) values[col - 1] = md.palavrasChaveSeo;
-      }
-    }
-
-    const outputRow = worksheet.addRow(values);
-    copyRowFormat(sourceRow, outputRow);
   }
-
-  worksheet.getColumn(columnByHeader.get(DESCRIPTION_COLUMN)).alignment = {
-    ...worksheet.getColumn(columnByHeader.get(DESCRIPTION_COLUMN)).alignment,
-    wrapText: true,
-    vertical: "top",
-  };
-
-  const tempPath = `${OUTPUT_FILE}.tmp`;
-  await workbook.xlsx.writeFile(tempPath);
-  await fs.rename(tempPath, OUTPUT_FILE);
-}
-
-function buildColumnIndex(headers) {
-  return new Map(headers.map((header, index) => [String(header), index + 1]));
-}
-
-function copyRowFormat(sourceRow, targetRow) {
-  targetRow.height = sourceRow.height;
-  targetRow.hidden = sourceRow.hidden;
-  targetRow.outlineLevel = sourceRow.outlineLevel;
-  targetRow.eachCell({ includeEmpty: true }, (cell, column) => {
-    const sourceCell = sourceRow.getCell(column);
-    cell.style = cloneStyle(sourceCell.style);
-    cell.numFmt = sourceCell.numFmt;
-    cell.alignment = cloneStyle(sourceCell.alignment);
-    cell.font = cloneStyle(sourceCell.font);
-    cell.fill = cloneStyle(sourceCell.fill);
-    cell.border = cloneStyle(sourceCell.border);
-    cell.protection = cloneStyle(sourceCell.protection);
-  });
-}
-
-function cloneStyle(style) {
-  return style ? JSON.parse(JSON.stringify(style)) : undefined;
-}
-
-function formatProgress(completed, total) {
-  const pct = total === 0 ? 0 : (completed / total) * 100;
-  return `${completed}/${total} (${pct.toFixed(1)}%)`;
-}
-
-function formatEta(startedAt, completedThisRun, remaining) {
-  if (completedThisRun <= 0 || remaining <= 0) return "0min";
-  const elapsedMs = Date.now() - startedAt;
-  const avgMs = elapsedMs / completedThisRun;
-  return formatDuration(avgMs * remaining);
-}
-
-function formatDuration(ms) {
-  const totalMinutes = Math.max(0, Math.ceil(ms / 60_000));
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (hours <= 0) return `${minutes}min`;
-  return `${hours}h ${minutes}min`;
-}
-
-function withTimeout(promise, timeoutMs, message) {
-  let timeoutId;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
-  });
-
-  return Promise.race([promise, timeout]).finally(() =>
-    clearTimeout(timeoutId),
-  );
-}
-
-function withOptionalTimeout(promise, timeoutMs, message) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
-  return withTimeout(promise, timeoutMs, message);
-}
-
-function isTimeoutLikeError(error) {
-  return (
-    error?.name === "TimeoutError" ||
-    /timeout/i.test(error?.message || "")
-  );
-}
-
-function cleanText(value) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .trim();
+  return text;
 }
 
 function normalizeUrl(value, baseUrl) {
@@ -3569,10 +3149,9 @@ export {
   processProduct,
   readCheckpoint,
   readProducts,
-  resolvePageAgentBundlePath,
-  runProductWorkers,
+  runProductsSequentially,
   searchStoreWithPage,
-  selectRelevantCandidatesWithPageAgent,
+  selectRelevantCandidatesWithGemini,
   validateProductMatchWithGemini,
   writeJsonAtomic,
   writeResults,
