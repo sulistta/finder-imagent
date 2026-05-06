@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 
 import { loadLocalOfficeAssets } from '../localOfficeAssets.js';
+import { BUBBLE_SITTING_OFFSET_PX, BUBBLE_VERTICAL_OFFSET_PX } from '../constants.js';
 import { activityAnimationMode } from '../localPipelineActivity.js';
 import { startGameLoop } from '../office/engine/gameLoop.js';
 import { OfficeState } from '../office/engine/officeState.js';
 import { renderFrame } from '../office/engine/renderer.js';
 import type { OfficeLayout } from '../office/types.js';
-import { TILE_SIZE, TileType } from '../office/types.js';
+import { CharacterState, TILE_SIZE, TileType } from '../office/types.js';
 
 export type ModelAgentRole = 'query' | 'ranking' | 'visual' | 'metadata';
 
@@ -451,7 +452,8 @@ function drawTextBubbles(
     const agent = byId.get(agentId);
     const text = dialogues.get(agentId) ?? 'Aguardando proximo produto.';
     const x = offset.offsetX + ch.x * zoom;
-    const y = offset.offsetY + ch.y * zoom - 54 * zoom;
+    const sittingOffset = ch.state === CharacterState.TYPE ? BUBBLE_SITTING_OFFSET_PX : 0;
+    const y = offset.offsetY + (ch.y + sittingOffset - BUBBLE_VERTICAL_OFFSET_PX) * zoom - 3 * zoom;
     drawPixelBubble(ctx, x, y, text, agent?.state ?? 'idle', zoom);
     hits.push({
       hit: { type: 'agent', id: agentId },
@@ -473,10 +475,12 @@ function drawPixelBubble(
 ): void {
   const fontSize = Math.max(12, Math.round(5 * zoom));
   ctx.font = `${fontSize}px "FS Pixel Sans", monospace`;
+  ctx.textBaseline = 'top';
   const lines = wrapText(ctx, text, 150 * (zoom / 2), 3);
   const width = Math.max(74 * (zoom / 2), Math.min(180 * (zoom / 2), maxLineWidth(ctx, lines) + 18));
   const lineHeight = fontSize + 2;
-  const height = lines.length * lineHeight + 12;
+  const paddingY = 6;
+  const height = lines.length * lineHeight + paddingY * 2;
   const x = Math.round(centerX - width / 2);
   const y = Math.round(bottomY - height);
   ctx.fillStyle = state === 'blocked' ? '#fff0c0' : state === 'error' ? '#ffd4dc' : '#fff8dc';
@@ -486,7 +490,7 @@ function drawPixelBubble(
   ctx.strokeRect(x, y, width, height);
   ctx.fillStyle = '#0a0a14';
   lines.forEach((line, index) => {
-    ctx.fillText(line, x + 9, y + 9 + fontSize + index * lineHeight);
+    ctx.fillText(line, x + 9, y + paddingY + index * lineHeight);
   });
   ctx.fillStyle = ctx.strokeStyle;
   ctx.fillRect(Math.round(centerX - 4), y + height - 1, 8, Math.max(4, Math.round(zoom * 2)));
