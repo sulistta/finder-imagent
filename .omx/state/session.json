@@ -1,0 +1,10 @@
+{
+  "session_id": "019dfbb5-cf21-7a60-a462-0dc859168bb1",
+  "native_session_id": "019dfbb5-cf21-7a60-a462-0dc859168bb1",
+  "started_at": "2026-05-06T05:48:53.026Z",
+  "cwd": "/home/vitor/projects/finder-imagent",
+  "pid": 282098,
+  "platform": "linux",
+  "pid_start_ticks": 3814145,
+  "pid_cmdline": "/home/vitor/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex"
+}

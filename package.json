@@ -1,0 +1,65 @@
+{
+  "name": "localhost-image-finder",
+  "displayName": "Localhost Image Finder",
+  "description": "Local workbook image finder with Google API-key workers and a pixel office progress view",
+  "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pablodelucca/pixel-agents"
+  },
+  "license": "MIT",
+  "main": "./dist/server.js",
+  "scripts": {
+    "build:webview": "cd webview-ui && npm run build",
+    "compile": "npm run check-types && npm run lint && node esbuild.js && npm run build:webview",
+    "build": "npm run compile",
+    "dev": "npm-run-all -p dev:server dev:webview",
+    "dev:server": "tsx server/src/index.ts",
+    "dev:webview": "cd webview-ui && npm run dev",
+    "start": "node dist/server.js",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production && npm run build:webview",
+    "check-types": "tsc --noEmit && tsc --noEmit -p server/tsconfig.test.json",
+    "prepare": "husky",
+    "lint": "eslint server/src/env.ts server/src/gemini.ts server/src/google.ts server/src/httpServer.ts server/src/index.ts server/src/jobManager.ts server/src/pageAgentSelection.ts server/src/types.ts server/src/workbook.ts server/__tests__/local-*.test.ts shared && cd webview-ui && npm run lint",
+    "lint:fix": "eslint server/src/env.ts server/src/gemini.ts server/src/google.ts server/src/httpServer.ts server/src/index.ts server/src/jobManager.ts server/src/pageAgentSelection.ts server/src/types.ts server/src/workbook.ts server/__tests__/local-*.test.ts shared --fix && cd webview-ui && npm run lint -- --fix",
+    "import-tileset": "tsx scripts/import-tileset-cli.ts",
+    "format": "prettier --write \"src/**/*.ts\" \"server/**/*.ts\" \"shared/**/*.ts\" \"webview-ui/src/**/*.{ts,tsx,css}\" \"*.{js,mjs}\" \"webview-ui/*.{js,ts}\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"server/**/*.ts\" \"shared/**/*.ts\" \"webview-ui/src/**/*.{ts,tsx,css}\" \"*.{js,mjs}\" \"webview-ui/*.{js,ts}\"",
+    "test:webview": "cd webview-ui && npm test",
+    "test:server": "cd server && npm test",
+    "test": "npm run test:webview && npm run test:server",
+    "knip": "knip"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "page-agent": "^1.8.1",
+    "playwright": "^1.58.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "25.x",
+    "@types/pngjs": "^6.0.5",
+    "esbuild": "^0.28.0",
+    "eslint": "^10.0.3",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-simple-import-sort": "^12.1.1",
+    "husky": "^9.1.7",
+    "knip": "^6.3.0",
+    "lint-staged": "^16.3.2",
+    "npm-run-all": "^4.1.5",
+    "pngjs": "^7.0.0",
+    "prettier": "^3.8.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.54.0",
+    "vitest": "^4.1.5"
+  },
+  "lint-staged": {
+    "src/**/*.ts": "eslint --fix",
+    "server/**/*.ts": "eslint --fix",
+    "shared/**/*.ts": "eslint --fix",
+    "webview-ui/src/**/*.{ts,tsx}": "eslint --fix",
+    "*.{ts,tsx,js,mjs,css,json,md}": "prettier --write",
+    "webview-ui/**/*.{ts,tsx,js,css,json}": "prettier --write"
+  }
+}

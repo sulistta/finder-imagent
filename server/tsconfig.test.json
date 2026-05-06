@@ -1,0 +1,21 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": [
+    "__tests__/local-*.test.ts",
+    "src/env.ts",
+    "src/gemini.ts",
+    "src/google.ts",
+    "src/httpServer.ts",
+    "src/index.ts",
+    "src/jobManager.ts",
+    "src/pageAgentSelection.ts",
+    "src/types.ts",
+    "src/workbook.ts"
+  ]
+}
