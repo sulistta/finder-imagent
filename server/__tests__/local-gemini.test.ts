@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { callGeminiJson, GeminiAiProvider } from '../src/gemini.js';
-import type { ProductInput, SearchCandidate } from '../src/types.js';
+import type { ProductInput } from '../src/types.js';
 
 describe('Gemini JSON responses', () => {
   afterEach(() => {
@@ -55,6 +55,7 @@ describe('Gemini JSON responses', () => {
     const provider = new GeminiAiProvider(
       { id: 'key-1', label: 'Google 1', key: 'secret' },
       {
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
         query: 'query-model',
         ranking: 'gemma-4-31b-it',
         visual: 'visual-model',
@@ -68,7 +69,7 @@ describe('Gemini JSON responses', () => {
     ]);
   });
 
-  it('selects only existing Google candidates from JSON model output', async () => {
+  it('accepts a single JSON object followed by extra model text', async () => {
     vi.stubGlobal('fetch', async () =>
       new Response(
         JSON.stringify({
@@ -77,13 +78,7 @@ describe('Gemini JSON responses', () => {
               content: {
                 parts: [
                   {
-                    text: JSON.stringify({
-                      candidatos: [
-                        { href: 'https://shop.test/b', motivo: 'modelo correto' },
-                        { href: 'https://missing.test/product', motivo: 'inventado' },
-                        { href: 'https://shop.test/b', motivo: 'duplicado' },
-                      ],
-                    }),
+                    text: `${JSON.stringify({ approved: true, reason: 'modelo correto' })}\nObservacao fora do JSON.`,
                   },
                 ],
               },
@@ -94,49 +89,39 @@ describe('Gemini JSON responses', () => {
       ),
     );
     const provider = providerFixture();
-    const candidates: SearchCandidate[] = [
-      { url: 'https://shop.test/a', title: 'A', snippet: 'A' },
-      { url: 'https://shop.test/b', title: 'B', snippet: 'B' },
-    ];
 
-    await expect(provider.selectCandidates(productFixture, 'Printer toner', candidates)).resolves.toEqual([
-      { url: 'https://shop.test/b', title: 'B', snippet: 'B', reason: 'modelo correto' },
-    ]);
+    await expect(
+      provider.validateProduct(productFixture, {
+        url: 'https://shop.test/product',
+        title: 'Printer toner',
+        h1: 'Printer toner',
+        metaDescription: 'A matching product',
+        jsonLdProducts: [],
+        text: 'SKU-1 Printer toner',
+        images: ['https://cdn.test/image.jpg'],
+      }),
+    ).resolves.toEqual({ approved: true, reason: 'modelo correto' });
   });
 
-  it('accepts a single JSON object followed by extra model text without selecting invented URLs', async () => {
-    vi.stubGlobal('fetch', async () =>
-      new Response(
+  it('retries transient Gemini server failures before returning JSON', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', async () => {
+      calls += 1;
+      if (calls < 3) {
+        return new Response('temporarily unavailable', { status: 503 });
+      }
+      return new Response(
         JSON.stringify({
-          candidates: [
-            {
-              content: {
-                parts: [
-                  {
-                    text: `${JSON.stringify({
-                      candidatos: [
-                        { href: 'https://shop.test/b', motivo: 'modelo correto' },
-                        { href: 'https://missing.test/product', motivo: 'inventado' },
-                      ],
-                    })}\nObservacao fora do JSON.`,
-                  },
-                ],
-              },
-            },
-          ],
+          candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }],
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
-      ),
-    );
-    const provider = providerFixture();
-    const candidates: SearchCandidate[] = [
-      { url: 'https://shop.test/a', title: 'A', snippet: 'A' },
-      { url: 'https://shop.test/b', title: 'B', snippet: 'B' },
-    ];
+      );
+    });
 
-    await expect(provider.selectCandidates(productFixture, 'Printer toner', candidates)).resolves.toEqual([
-      { url: 'https://shop.test/b', title: 'B', snippet: 'B', reason: 'modelo correto' },
-    ]);
+    await expect(callGeminiJson<{ ok: boolean }>('api-key', 'visual-model', ['validate'])).resolves.toEqual({
+      ok: true,
+    });
+    expect(calls).toBe(3);
   });
 
   it('rejects visual matches for conflicting model variants before calling Gemini', async () => {
@@ -169,6 +154,7 @@ function providerFixture(): GeminiAiProvider {
   return new GeminiAiProvider(
     { id: 'key-1', label: 'Google 1', key: 'secret' },
     {
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
       query: 'query-model',
       ranking: 'gemma-4-31b-it',
       visual: 'visual-model',

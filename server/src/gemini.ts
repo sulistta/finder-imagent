@@ -4,13 +4,11 @@ import type {
   MetadataColumnKey,
   ModelConfig,
   ProductInput,
-  SearchCandidate,
   VisualValidation,
 } from './types.js';
 
 export interface AiProvider {
   generateQueries(product: ProductInput, allowedQueries: string[]): Promise<string[]>;
-  selectCandidates(product: ProductInput, query: string, candidates: SearchCandidate[]): Promise<SearchCandidate[]>;
   validateProduct(product: ProductInput, page: ExtractedPage): Promise<VisualValidation>;
   generateMetadata(
     product: ProductInput,
@@ -34,35 +32,6 @@ export class GeminiAiProvider implements AiProvider {
       'Responda somente JSON no formato {"queries":["termo"]}. Cada item de queries deve ser copia exata de uma busca permitida.',
     ]);
     return normalizeAllowedQueries(response.queries ?? [], allowedQueries);
-  }
-
-  async selectCandidates(product: ProductInput, query: string, candidates: SearchCandidate[]): Promise<SearchCandidate[]> {
-    if (candidates.length === 0) return [];
-    const model = requireModel(this.models.ranking, 'GEMINI_RANKING_MODEL');
-    const response = await callGeminiJson<{ candidatos?: Array<{ href?: string; motivo?: string }> }>(this.apiKey.key, model, [
-      'Selecione apenas resultados organicos realmente relevantes para o produto procurado.',
-      `Produto: SKU ${product.sku}; nome ${product.title}; categoria ${product.category || 'n/a'}.`,
-      `Query usada no Google: ${query}.`,
-      JSON.stringify({
-        candidatosDisponiveis: candidates.map((candidate, index) => ({
-          index: index + 1,
-          href: candidate.url,
-          texto: [candidate.title, candidate.snippet].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 900),
-        })),
-      }),
-      'Responda somente JSON no formato {"candidatos":[{"href":"...","motivo":"..."}]}. Nao invente URLs. Cada href deve ser exatamente um href de candidatosDisponiveis. Se nenhum parecer relacionado, retorne lista vazia.',
-    ]);
-    const requested = response.candidatos ?? [];
-    const byUrl = new Map(candidates.map((candidate) => [candidate.url, candidate]));
-    const selected = new Set<string>();
-    return requested.flatMap((item) => {
-      const url = typeof item.href === 'string' ? item.href : '';
-      const candidate = byUrl.get(url);
-      if (!candidate || selected.has(candidate.url)) return [];
-      selected.add(candidate.url);
-      const reason = typeof item.motivo === 'string' ? item.motivo.replace(/\s+/g, ' ').trim() : '';
-      return [{ ...candidate, ...(reason ? { reason } : {}) }];
-    });
   }
 
   async validateProduct(product: ProductInput, page: ExtractedPage): Promise<VisualValidation> {
@@ -118,27 +87,48 @@ export async function callGeminiJson<T>(
   model: string,
   textParts: string[],
 ): Promise<T> {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: textParts.map((text) => ({ text })) }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-        },
-      }),
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const body = JSON.stringify({
+    contents: [{ role: 'user', parts: textParts.map((text) => ({ text })) }],
+    generationConfig: {
+      responseMimeType: 'application/json',
     },
-  );
-  if (!response.ok) {
-    throw new Error(`Gemini request failed: ${response.status} ${await response.text()}`);
+  });
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      if (!response.ok) {
+        const error = new Error(`Gemini request failed: ${response.status} ${await response.text()}`);
+        if (attempt < 3 && isRetryableGeminiStatus(response.status)) {
+          lastError = error;
+          await delay(retryDelayMs(attempt));
+          continue;
+        }
+        throw error;
+      }
+      const payload = (await response.json()) as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      };
+      const text = payload.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '{}';
+      return parseGeminiJson<T>(text);
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      if (attempt < 3 && isRetryableGeminiError(normalized)) {
+        lastError = normalized;
+        await delay(retryDelayMs(attempt));
+        continue;
+      }
+      throw normalized;
+    }
   }
-  const payload = (await response.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-  };
-  const text = payload.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '{}';
-  return parseGeminiJson<T>(text);
+
+  throw lastError ?? new Error('Gemini request failed after retries');
 }
 
 function requireModel(model: string, envName: string): string {
@@ -226,4 +216,20 @@ function extractFirstJsonObject(text: string): string {
     }
   }
   return text;
+}
+
+function isRetryableGeminiStatus(status: number): boolean {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function isRetryableGeminiError(error: Error): boolean {
+  return /fetch failed|network|timeout|econnreset|etimedout/i.test(error.message);
+}
+
+function retryDelayMs(attempt: number): number {
+  return 300 * 2 ** (attempt - 1);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

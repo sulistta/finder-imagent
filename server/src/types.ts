@@ -90,6 +90,7 @@ export interface ApiKeyConfig {
 }
 
 export interface ModelConfig {
+  baseUrl: string;
   query: string;
   ranking: string;
   visual: string;
@@ -101,6 +102,7 @@ export interface GoogleRuntimeConfig {
   delayMaxMs: number;
   maxQueries: number;
   maxCandidatesPerQuery: number;
+  pageAgentRankingTimeoutMs: number;
 }
 
 export interface ProductInput {

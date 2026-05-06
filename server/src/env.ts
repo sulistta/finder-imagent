@@ -21,6 +21,7 @@ export function loadServerEnv(cwd = process.cwd()): ServerEnv {
     googleHeadless: readBoolean(process.env.GOOGLE_HEADLESS, false),
     apiKeys: readGoogleApiKeys(),
     models: {
+      baseUrl: process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai',
       query: process.env.GEMINI_QUERY_MODEL || '',
       ranking: process.env.GEMINI_RANKING_MODEL || '',
       visual: process.env.GEMINI_VISUAL_MODEL || '',
@@ -31,6 +32,7 @@ export function loadServerEnv(cwd = process.cwd()): ServerEnv {
       delayMaxMs: readNonNegativeInt(process.env.GOOGLE_DELAY_MAX_MS, 5_000),
       maxQueries: readPositiveInt(process.env.GOOGLE_MAX_QUERIES, 6),
       maxCandidatesPerQuery: readPositiveInt(process.env.GOOGLE_MAX_CANDIDATES_PER_QUERY, 5),
+      pageAgentRankingTimeoutMs: readPositiveInt(process.env.PAGE_AGENT_RANKING_TIMEOUT_MS, 90_000),
     },
   };
 }

@@ -14,6 +14,7 @@
     "src/httpServer.ts",
     "src/index.ts",
     "src/jobManager.ts",
+    "src/pageAgentSelection.ts",
     "src/types.ts",
     "src/workbook.ts"
   ]

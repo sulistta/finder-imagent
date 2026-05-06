@@ -68,6 +68,7 @@ interface ModelAgentGroup {
 }
 
 const MODEL_AGENT_ROLES: ModelAgentRole[] = ['query', 'ranking', 'visual', 'metadata'];
+const LOCAL_EVIDENCE_THRESHOLD = 2;
 
 export class ImageFinderJobManager {
   private readonly jobs = new Map<string, JobRecord>();
@@ -195,8 +196,11 @@ export class ImageFinderJobManager {
         search:
           this.options.searchProviderFactory?.() ??
           new GooglePlaywrightSearchProvider({
+            apiKey,
             headless: this.options.googleHeadless,
             maxCandidatesPerQuery: this.options.google.maxCandidatesPerQuery,
+            models: this.options.models,
+            pageAgentRankingTimeoutMs: this.options.google.pageAgentRankingTimeoutMs,
             onManualAction: (action) => {
               const activeRole = group.activeRole ?? 'ranking';
               const activeAgent = group.agents[activeRole];
@@ -247,7 +251,7 @@ export class ImageFinderJobManager {
 
     try {
       const allowedQueries = buildDeterministicQueries(product).slice(0, this.options.google.maxQueries);
-      const { queries, diagnostics } = await this.generateQueries(group, product, allowedQueries);
+      const { queries, diagnostics } = this.generateQueries(product, allowedQueries);
       productDiagnostics.push(`queries=${queries.length}`, ...diagnostics);
       completeAgentStage(record, group.agents.query);
 
@@ -259,7 +263,7 @@ export class ImageFinderJobManager {
       completeAgentStage(record, group.agents.ranking);
 
       activeAgent = group.agents.visual;
-      const result = await this.validateCandidates(record, group, product, selected);
+      const result = await this.validateCandidates(record, group, product, selected, productDiagnostics);
 
       activeAgent = group.agents.metadata;
       activateAgent(record, group, 'metadata', productLabel);
@@ -302,25 +306,16 @@ export class ImageFinderJobManager {
     }
   }
 
-  private async generateQueries(
-    group: ModelAgentGroup,
-    product: ProductInput,
+  private generateQueries(
+    _product: ProductInput,
     allowedQueries: string[],
-  ): Promise<{ queries: string[]; diagnostics: string[] }> {
+  ): { queries: string[]; diagnostics: string[] } {
     if (allowedQueries.length === 0) {
       throw new Error('No deterministic Google queries could be built for the product.');
     }
-    const generated = await group.ai.generateQueries(product, allowedQueries);
-    const queries = generated.slice(0, this.options.google.maxQueries);
-    if (queries.length === 0) {
-      return {
-        queries: allowedQueries.slice(0, this.options.google.maxQueries),
-        diagnostics: ['queryModelNoAllowedOutput=true', `deterministicQueries=${allowedQueries.length}`],
-      };
-    }
     return {
-      queries,
-      diagnostics: [`queryModel=${generated.length}`],
+      queries: allowedQueries.slice(0, this.options.google.maxQueries),
+      diagnostics: ['queryMode=deterministic', `deterministicQueries=${allowedQueries.length}`],
     };
   }
 
@@ -332,15 +327,13 @@ export class ImageFinderJobManager {
   ): Promise<{ selected: SearchCandidate[]; diagnostics: string[] }> {
     const selected: SearchCandidate[] = [];
     const selectedUrls = new Set<string>();
-    let serpCandidates = 0;
+    let rankedCandidates = 0;
 
     for (const query of queries) {
       const candidates = await group.search.searchQuery(product, query);
-      serpCandidates += candidates.length;
+      rankedCandidates += candidates.length;
       if (candidates.length === 0) continue;
-
-      const ranked = await group.ai.selectCandidates(product, query, candidates);
-      for (const candidate of ranked) {
+      for (const candidate of candidates) {
         if (selectedUrls.has(candidate.url)) continue;
         selectedUrls.add(candidate.url);
         selected.push(candidate);
@@ -350,11 +343,11 @@ export class ImageFinderJobManager {
     }
 
     if (selected.length === 0) {
-      throw new Error('Ranking selected no Google candidates.');
+    throw new Error('Google search selected no candidates.');
     }
     return {
       selected,
-      diagnostics: [`serpCandidates=${serpCandidates}`, `selectedCandidates=${selected.length}`],
+      diagnostics: [`rankedCandidates=${rankedCandidates}`, `selectedCandidates=${selected.length}`],
     };
   }
 
@@ -363,20 +356,45 @@ export class ImageFinderJobManager {
     group: ModelAgentGroup,
     product: ProductInput,
     candidates: SearchCandidate[],
+    productDiagnostics: string[],
   ) {
     activateAgent(record, group, 'visual', product.sku || product.title);
     let visualCompleted = false;
+    const candidateFailures: string[] = [];
     for (const candidate of candidates) {
-      const page = await group.search.extract(candidate);
-      const validation = await group.ai.validateProduct(product, page);
-      if (validation.approved && page.images.length > 0) {
-        completeAgentStage(record, group.agents.visual);
-        visualCompleted = true;
-        return { page, reason: validation.reason };
+      try {
+        const page = await group.search.extract(candidate);
+        const evidence = scoreLocalProductEvidence(product, page);
+        const imageCount = page.images.length;
+        productDiagnostics.push(
+          `candidate=${candidate.url} images=${imageCount} evidence=${evidence.score} title=${truncateDiagnostic(page.title || page.h1)}`,
+        );
+
+        if (imageCount === 0) {
+          candidateFailures.push(`${candidate.url} | sem_imagem`);
+          continue;
+        }
+
+        if (evidence.score < LOCAL_EVIDENCE_THRESHOLD) {
+          candidateFailures.push(`${candidate.url} | evidencia_local_baixa=${evidence.score}`);
+          continue;
+        }
+
+        const validation = await group.ai.validateProduct(product, page);
+        if (validation.approved) {
+          completeAgentStage(record, group.agents.visual);
+          visualCompleted = true;
+          return { page, reason: validation.reason };
+        }
+        candidateFailures.push(`${candidate.url} | gemini_reprovou=${truncateDiagnostic(validation.reason)}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        candidateFailures.push(`${candidate.url} | erro=${truncateDiagnostic(message)}`);
       }
     }
     if (!visualCompleted) group.activeRole = 'visual';
-    throw new Error('No candidate clearly matched the product.');
+    productDiagnostics.push(...candidateFailures.slice(0, 8).map((failure) => `candidateRejected=${failure}`));
+    throw new Error(`No candidate clearly matched the product. ${candidateFailures.slice(0, 3).join(' || ')}`);
   }
 
   private requireJob(id: string): JobRecord {
@@ -416,8 +434,6 @@ function validateJobConfig(config: JobConfig): void {
 
 function requireConfiguredModels(models: ModelConfig): void {
   const required: Array<[keyof ModelConfig, string]> = [
-    ['query', 'GEMINI_QUERY_MODEL'],
-    ['ranking', 'GEMINI_RANKING_MODEL'],
     ['visual', 'GEMINI_VISUAL_MODEL'],
     ['metadata', 'GEMINI_METADATA_MODEL'],
   ];
@@ -493,8 +509,75 @@ function clearGroupAgents(record: JobRecord, group: ModelAgentGroup): void {
 }
 
 function modelForRole(role: ModelAgentRole, models: ModelConfig): string {
+  if (role === 'query') return models.query || 'deterministic';
+  if (role === 'ranking') return models.ranking || 'deterministic';
   if (role === 'visual') return models.visual;
   return models[role];
+}
+
+function scoreLocalProductEvidence(product: ProductInput, page: { title: string; h1: string; metaDescription: string; text: string; url: string }) {
+  const haystack = normalizeEvidenceText([page.title, page.h1, page.metaDescription, page.text, page.url].join(' '));
+  const tokens = evidenceTokens([product.sku, product.title, product.category || ''].join(' '));
+  let score = 0;
+  const matched: string[] = [];
+  for (const token of tokens) {
+    if (!haystack.includes(token.value)) continue;
+    score += token.weight;
+    matched.push(token.value);
+  }
+  return { score, matched };
+}
+
+function evidenceTokens(value: string): Array<{ value: string; weight: number }> {
+  const seen = new Set<string>();
+  return normalizeEvidenceText(value)
+    .split(/\s+/)
+    .filter((token) => {
+      if (seen.has(token) || token.length < 2 || isWeakEvidenceToken(token)) return false;
+      seen.add(token);
+      return true;
+    })
+    .map((token) => ({ value: token, weight: /\d/.test(token) ? 5 : 1 }));
+}
+
+function normalizeEvidenceText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isWeakEvidenceToken(token: string): boolean {
+  return new Set([
+    'de',
+    'da',
+    'do',
+    'das',
+    'dos',
+    'com',
+    'para',
+    'por',
+    'produto',
+    'product',
+    'cartucho',
+    'toner',
+    'tinta',
+    'preto',
+    'preta',
+    'color',
+    'colorido',
+    'colorida',
+    'original',
+    'compativel',
+    'compatível',
+  ]).has(token);
+}
+
+function truncateDiagnostic(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().slice(0, 180);
 }
 
 function roleLabel(role: ModelAgentRole): string {

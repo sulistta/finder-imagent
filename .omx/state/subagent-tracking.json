@@ -50,15 +50,45 @@
     "019dfbd7-ce4a-7832-b81d-f7de6689c468": {
       "session_id": "019dfbd7-ce4a-7832-b81d-f7de6689c468",
       "leader_thread_id": "019dfbd7-ce4a-7832-b81d-f7de6689c468",
-      "updated_at": "2026-05-06T08:10:08.655Z",
+      "updated_at": "2026-05-06T09:34:33.178Z",
       "threads": {
         "019dfbd7-ce4a-7832-b81d-f7de6689c468": {
           "thread_id": "019dfbd7-ce4a-7832-b81d-f7de6689c468",
           "kind": "leader",
           "first_seen_at": "2026-05-06T08:10:08.655Z",
-          "last_seen_at": "2026-05-06T08:10:08.655Z",
-          "last_turn_id": "019dfc3c-46e2-7ed1-9e3f-9af1c1006b0d",
-          "turn_count": 1
+          "last_seen_at": "2026-05-06T09:34:33.178Z",
+          "last_turn_id": "019dfc9e-e1d9-7962-b470-f2e6bd011126",
+          "turn_count": 6
+        }
+      }
+    },
+    "019dfd15-0f7e-7a30-9925-e61a4c407c05": {
+      "session_id": "019dfd15-0f7e-7a30-9925-e61a4c407c05",
+      "leader_thread_id": "019dfd15-0f7e-7a30-9925-e61a4c407c05",
+      "updated_at": "2026-05-06T11:48:20.531Z",
+      "threads": {
+        "019dfd15-0f7e-7a30-9925-e61a4c407c05": {
+          "thread_id": "019dfd15-0f7e-7a30-9925-e61a4c407c05",
+          "kind": "leader",
+          "first_seen_at": "2026-05-06T11:43:54.538Z",
+          "last_seen_at": "2026-05-06T11:48:20.531Z",
+          "last_turn_id": "019dfd1a-ac15-7cf0-b372-0213ec53c342",
+          "turn_count": 2
+        }
+      }
+    },
+    "019dfd20-ef51-7ef0-a02e-82cd2e4f4e32": {
+      "session_id": "019dfd20-ef51-7ef0-a02e-82cd2e4f4e32",
+      "leader_thread_id": "019dfd20-ef51-7ef0-a02e-82cd2e4f4e32",
+      "updated_at": "2026-05-06T12:43:10.019Z",
+      "threads": {
+        "019dfd20-ef51-7ef0-a02e-82cd2e4f4e32": {
+          "thread_id": "019dfd20-ef51-7ef0-a02e-82cd2e4f4e32",
+          "kind": "leader",
+          "first_seen_at": "2026-05-06T12:10:35.451Z",
+          "last_seen_at": "2026-05-06T12:43:10.019Z",
+          "last_turn_id": "019dfd49-e9e6-79d1-b5e7-a1ee14481743",
+          "turn_count": 4
         }
       }
     }
