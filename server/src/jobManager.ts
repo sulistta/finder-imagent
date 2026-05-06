@@ -229,7 +229,7 @@ export class ImageFinderJobManager {
               emitActivity(record, group, activeRole, null, {
                 phase: 'captcha',
                 state: 'unblocked',
-                message: 'Google CAPTCHA resolved',
+                message: 'CAPTCHA do Google resolvido. Retomando a busca.',
                 reason: action.url,
               });
               emitAgent(record, activeAgent, activeRole);
@@ -267,7 +267,7 @@ export class ImageFinderJobManager {
     emitActivity(record, group, 'query', product, {
       phase: 'product:start',
       state: 'start',
-      message: `Starting ${productLabel}`,
+      message: `Iniciando produto ${productLabel}.`,
     });
 
     try {
@@ -276,7 +276,7 @@ export class ImageFinderJobManager {
       emitActivity(record, group, 'query', product, {
         phase: 'query:build',
         state: 'success',
-        message: `${queries.length} deterministic Google quer${queries.length === 1 ? 'y' : 'ies'} ready`,
+        message: `Montei ${queries.length} busca${queries.length === 1 ? '' : 's'} deterministica${queries.length === 1 ? '' : 's'} para o Google.`,
       });
       productDiagnostics.push(`queries=${queries.length}`, ...diagnostics);
       completeAgentStage(record, group.agents.query);
@@ -302,13 +302,13 @@ export class ImageFinderJobManager {
       emitActivity(record, group, 'metadata', product, {
         phase: 'metadata:generate',
         state: 'start',
-        message: `${product.emptyMetadataFields.length} metadata field${product.emptyMetadataFields.length === 1 ? '' : 's'}`,
+        message: `Gerando ${product.emptyMetadataFields.length} campo${product.emptyMetadataFields.length === 1 ? '' : 's'} de metadata.`,
       });
       const metadata = await group.ai.generateMetadata(product, result.page, product.emptyMetadataFields);
       emitActivity(record, group, 'metadata', product, {
         phase: 'metadata:generate',
         state: 'success',
-        message: 'Metadata generated',
+        message: 'Metadata gerada com sucesso.',
       });
       completeAgentStage(record, group.agents.metadata);
       const productResult: ProductResult = {
@@ -328,7 +328,7 @@ export class ImageFinderJobManager {
         state: 'success',
         imageCount: productResult.images.length,
         reason: productResult.validationReason,
-        message: `${productResult.images.length} image${productResult.images.length === 1 ? '' : 's'} selected`,
+        message: `Produto concluido com ${productResult.images.length} imagem${productResult.images.length === 1 ? '' : 's'} selecionada${productResult.images.length === 1 ? '' : 's'}.`,
       });
       emitProduct(record, productResult);
       clearGroupAgents(record, group);
@@ -350,7 +350,7 @@ export class ImageFinderJobManager {
         phase: 'product:failed',
         state: 'error',
         reason: message,
-        message: `Failed ${productLabel}`,
+        message: `Falhei ao processar ${productLabel}.`,
       });
       emitAgent(record, activeAgent, activeAgent.role);
       record.status.totals.failed += 1;
@@ -390,7 +390,7 @@ export class ImageFinderJobManager {
         phase: 'ranking:search',
         state: 'start',
         query,
-        message: 'Searching Google',
+        message: `Pesquisando no Google: ${query}.`,
       });
       const candidates = await group.search.searchQuery(product, query);
       rankedCandidates += candidates.length;
@@ -398,7 +398,7 @@ export class ImageFinderJobManager {
         phase: 'ranking:candidates',
         state: candidates.length === 0 ? 'rejected' : 'progress',
         query,
-        message: `${candidates.length} candidate${candidates.length === 1 ? '' : 's'} found`,
+        message: `Encontrei ${candidates.length} candidato${candidates.length === 1 ? '' : 's'} para esta busca.`,
       });
       if (candidates.length === 0) continue;
       for (const candidate of candidates) {
@@ -416,7 +416,7 @@ export class ImageFinderJobManager {
     emitActivity(record, group, 'ranking', product, {
       phase: 'ranking:candidates',
       state: 'success',
-      message: `${selected.length} selected from ${rankedCandidates} ranked candidates`,
+      message: `Selecionei ${selected.length} de ${rankedCandidates} candidato${rankedCandidates === 1 ? '' : 's'} ranqueado${rankedCandidates === 1 ? '' : 's'}.`,
     });
     return {
       selected,
@@ -444,7 +444,7 @@ export class ImageFinderJobManager {
           phase: 'visual:extract',
           state: 'start',
           candidate,
-          message: 'Opening candidate page',
+          message: `Abrindo pagina candidata: ${candidate.title || candidate.url}.`,
         });
         const page = await group.search.extract(candidate);
         const evidence = scoreLocalProductEvidence(product, page);
@@ -455,7 +455,7 @@ export class ImageFinderJobManager {
           candidate,
           imageCount,
           evidenceScore: evidence.score,
-          message: `${imageCount} image${imageCount === 1 ? '' : 's'}, evidence ${evidence.score}`,
+          message: `Extraí ${imageCount} imagem${imageCount === 1 ? '' : 's'} e evidência local ${evidence.score}.`,
         });
         productDiagnostics.push(
           `candidate=${candidate.url} images=${imageCount} evidence=${evidence.score} title=${truncateDiagnostic(page.title || page.h1)}`,
@@ -469,7 +469,7 @@ export class ImageFinderJobManager {
             imageCount,
             evidenceScore: evidence.score,
             reason: 'sem_imagem',
-            message: 'Candidate has no usable images',
+            message: 'Rejeitei o candidato porque nao encontrei imagens usaveis.',
           });
           rejectCandidate(`${candidate.url} | sem_imagem`);
           continue;
@@ -483,7 +483,7 @@ export class ImageFinderJobManager {
             imageCount,
             evidenceScore: evidence.score,
             reason: `evidencia_local_baixa=${evidence.score}`,
-            message: 'Local product evidence is too weak',
+            message: `Rejeitei por evidência local baixa (${evidence.score}).`,
           });
           rejectCandidate(`${candidate.url} | evidencia_local_baixa=${evidence.score}`);
           continue;
@@ -495,7 +495,7 @@ export class ImageFinderJobManager {
           candidate,
           imageCount,
           evidenceScore: evidence.score,
-          message: 'Validating with Gemini',
+          message: 'Validando correspondência visual com Gemini.',
         });
         const validation = await group.ai.validateProduct(product, page);
         if (validation.approved) {
@@ -506,7 +506,7 @@ export class ImageFinderJobManager {
             imageCount,
             evidenceScore: evidence.score,
             reason: validation.reason,
-            message: 'Gemini approved candidate',
+            message: 'Gemini aprovou este candidato.',
           });
           completeAgentStage(record, group.agents.visual);
           visualCompleted = true;
@@ -519,7 +519,7 @@ export class ImageFinderJobManager {
           imageCount,
           evidenceScore: evidence.score,
           reason: validation.reason,
-          message: 'Gemini rejected candidate',
+          message: `Gemini rejeitou: ${truncateDiagnostic(validation.reason)}.`,
         });
         rejectCandidate(`${candidate.url} | gemini_reprovou=${truncateDiagnostic(validation.reason)}`);
       } catch (error) {
@@ -529,7 +529,7 @@ export class ImageFinderJobManager {
           state: 'error',
           candidate,
           reason: message,
-          message: 'Candidate extraction failed',
+          message: `Erro ao extrair candidato: ${truncateDiagnostic(message)}.`,
         });
         rejectCandidate(`${candidate.url} | erro=${truncateDiagnostic(message)}`);
       }

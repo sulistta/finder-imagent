@@ -78,7 +78,7 @@ export interface JobActivityEvent {
   imageCount?: number;
   evidenceScore?: number;
   reason?: string;
-  message?: string;
+  message: string;
 }
 
 export interface AgentStatus {

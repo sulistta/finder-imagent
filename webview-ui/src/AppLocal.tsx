@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   type LocalAgentStatus,
+  LocalImageLabScene,
   type LocalJobActivityEvent,
-  LocalPipelineOffice,
-} from './components/LocalPipelineOffice.js';
+} from './components/LocalImageLabScene.js';
 
 type MetadataColumnKey = 'description' | 'category' | 'seoTitle' | 'seoDescription' | 'seoKeywords';
 
@@ -264,7 +264,7 @@ export default function AppLocal() {
               </a>
             )}
           </div>
-          <LocalPipelineOffice agents={agents} activities={activities} products={products} />
+          <LocalImageLabScene agents={agents} activities={activities} products={products} />
         </div>
       </section>
 

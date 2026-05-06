@@ -209,6 +209,7 @@ describe('ImageFinderJobManager', () => {
       imageCount: 1,
       evidenceScore: expect.any(Number),
     });
+    expect(activities.every((event) => event.message.trim().length > 0)).toBe(true);
     expect(activities.at(-1)).toMatchObject({
       phase: 'product:complete',
       state: 'success',

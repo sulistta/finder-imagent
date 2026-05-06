@@ -258,6 +258,35 @@ select[multiple] {
   gap: 10px;
 }
 
+.local-image-lab {
+  display: grid;
+  gap: 10px;
+}
+
+.local-image-lab-canvas-wrap {
+  width: 100%;
+  height: min(62vh, 620px);
+  min-height: 460px;
+  overflow: hidden;
+  border: 2px solid #34344d;
+  background: #0f1020;
+}
+
+.local-image-lab-canvas {
+  display: block;
+  image-rendering: pixelated;
+  cursor: crosshair;
+}
+
+.local-scene-state {
+  min-height: 360px;
+  display: grid;
+  place-items: center;
+  color: var(--color-text-muted);
+  border: 2px solid #34344d;
+  background: #0f1020;
+}
+
 .pipeline-canvas-wrap {
   width: 100%;
   overflow: auto;
