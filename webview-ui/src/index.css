@@ -265,8 +265,8 @@ select[multiple] {
 
 .local-image-lab-canvas-wrap {
   width: 100%;
-  height: min(62vh, 620px);
-  min-height: 460px;
+  height: min(70vh, 760px);
+  min-height: 560px;
   overflow: hidden;
   border: 2px solid #34344d;
   background: #0f1020;

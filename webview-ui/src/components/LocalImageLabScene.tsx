@@ -6,7 +6,7 @@ import { startGameLoop } from '../office/engine/gameLoop.js';
 import { OfficeState } from '../office/engine/officeState.js';
 import { renderFrame } from '../office/engine/renderer.js';
 import type { OfficeLayout } from '../office/types.js';
-import { TILE_SIZE } from '../office/types.js';
+import { TILE_SIZE, TileType } from '../office/types.js';
 
 export type ModelAgentRole = 'query' | 'ranking' | 'visual' | 'metadata';
 
@@ -93,6 +93,23 @@ interface SceneRuntime {
   officeState: OfficeState;
   layout: OfficeLayout;
 }
+
+interface SceneTileBounds {
+  minCol: number;
+  minRow: number;
+  maxCol: number;
+  maxRow: number;
+}
+
+interface SceneFrame {
+  zoom: number;
+  panX: number;
+  panY: number;
+}
+
+const sceneFitPadding = 0.96;
+const sceneMinZoom = 2;
+const sceneMaxZoom = 10;
 
 const roleSeatTargets: Record<ModelAgentRole, Array<{ col: number; row: number }>> = {
   query: [{ col: 3, row: 14 }],
@@ -190,7 +207,7 @@ export function LocalImageLabScene({ agents, activities, products }: LocalImageL
     const stop = startGameLoop(canvas, {
       update: (dt) => runtime.officeState.update(dt),
       render: (ctx) => {
-        const zoom = sceneZoom();
+        const frame = sceneFrame(canvas, runtime.layout);
         const offset = renderFrame(
           ctx,
           canvas.width,
@@ -198,9 +215,9 @@ export function LocalImageLabScene({ agents, activities, products }: LocalImageL
           runtime.officeState.tileMap,
           runtime.officeState.furniture,
           [...runtime.officeState.characters.values()],
-          zoom,
-          0,
-          -32 * zoom,
+          frame.zoom,
+          frame.panX,
+          frame.panY,
           {
             selectedAgentId: selectedRef.current?.type === 'agent'
               ? idToNumericRef.current.get(selectedRef.current.id) ?? null
@@ -222,7 +239,7 @@ export function LocalImageLabScene({ agents, activities, products }: LocalImageL
           productsBySkuRef.current,
           selectedRef.current,
           offset,
-          zoom,
+          frame.zoom,
           hitsRef.current,
           performance.now(),
         );
@@ -233,7 +250,7 @@ export function LocalImageLabScene({ agents, activities, products }: LocalImageL
           dialoguesRef.current,
           agentsRef.current,
           offset,
-          zoom,
+          frame.zoom,
           hitsRef.current,
         );
       },
@@ -350,8 +367,49 @@ function resizeCanvas(canvas: HTMLCanvasElement, container: HTMLDivElement): voi
   canvas.style.height = `${rect.height}px`;
 }
 
-function sceneZoom(): number {
-  return Math.max(2, Math.round((window.devicePixelRatio || 1) * 2));
+function sceneFrame(canvas: HTMLCanvasElement, layout: OfficeLayout): SceneFrame {
+  const bounds = visibleTileBounds(layout);
+  const contentCols = Math.max(1, bounds.maxCol - bounds.minCol + 1);
+  const contentRows = Math.max(1, bounds.maxRow - bounds.minRow + 1);
+  const fitZoom = Math.min(
+    canvas.width / (contentCols * TILE_SIZE),
+    canvas.height / (contentRows * TILE_SIZE),
+  ) * sceneFitPadding;
+  const zoom = clampZoom(fitZoom);
+  const fullCenterX = (layout.cols * TILE_SIZE * zoom) / 2;
+  const fullCenterY = (layout.rows * TILE_SIZE * zoom) / 2;
+  const contentCenterX = ((bounds.minCol + bounds.maxCol + 1) * TILE_SIZE * zoom) / 2;
+  const contentCenterY = ((bounds.minRow + bounds.maxRow + 1) * TILE_SIZE * zoom) / 2;
+  return {
+    zoom,
+    panX: Math.round(fullCenterX - contentCenterX),
+    panY: Math.round(fullCenterY - contentCenterY),
+  };
+}
+
+function visibleTileBounds(layout: OfficeLayout): SceneTileBounds {
+  let minCol = layout.cols;
+  let minRow = layout.rows;
+  let maxCol = -1;
+  let maxRow = -1;
+  for (let row = 0; row < layout.rows; row += 1) {
+    for (let col = 0; col < layout.cols; col += 1) {
+      if (layout.tiles[row * layout.cols + col] === TileType.VOID) continue;
+      minCol = Math.min(minCol, col);
+      minRow = Math.min(minRow, row);
+      maxCol = Math.max(maxCol, col);
+      maxRow = Math.max(maxRow, row);
+    }
+  }
+  if (maxCol < 0 || maxRow < 0) {
+    return { minCol: 0, minRow: 0, maxCol: Math.max(0, layout.cols - 1), maxRow: Math.max(0, layout.rows - 1) };
+  }
+  return { minCol, minRow, maxCol, maxRow };
+}
+
+function clampZoom(value: number): number {
+  if (!Number.isFinite(value)) return sceneMinZoom;
+  return Math.max(sceneMinZoom, Math.min(sceneMaxZoom, Math.round(value)));
 }
 
 function buildDialogues(
