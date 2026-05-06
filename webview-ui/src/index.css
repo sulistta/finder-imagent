@@ -253,6 +253,51 @@ select[multiple] {
   margin-bottom: 12px;
 }
 
+.local-pipeline-office {
+  display: grid;
+  gap: 10px;
+}
+
+.pipeline-canvas-wrap {
+  width: 100%;
+  overflow: auto;
+  border: 2px solid #34344d;
+  background: #0f1020;
+}
+
+.pipeline-canvas {
+  display: block;
+  image-rendering: pixelated;
+  cursor: crosshair;
+}
+
+.pipeline-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px;
+  color: var(--color-text-muted);
+  background: #161624;
+  border: 2px solid #34344d;
+}
+
+.pipeline-details strong {
+  color: #fff5d8;
+}
+
+.pipeline-details span,
+.pipeline-details small,
+.pipeline-details a {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.pipeline-details a {
+  color: #9dccff;
+}
+
 .pixel-office {
   min-height: 360px;
   overflow: hidden;

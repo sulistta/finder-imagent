@@ -11,6 +11,7 @@ import type {
   AgentStatus,
   ApiKeyConfig,
   GoogleRuntimeConfig,
+  JobActivityEvent,
   JobConfig,
   JobStatus,
   ModelAgentRole,
@@ -30,7 +31,7 @@ import {
 } from './workbook.js';
 
 export interface JobEvent {
-  type: 'status' | 'agent' | 'product' | 'log';
+  type: 'status' | 'agent' | 'product' | 'activity' | 'log';
   data: unknown;
 }
 
@@ -51,6 +52,7 @@ interface JobRecord {
   config: JobConfig;
   status: JobStatus;
   agents: AgentStatus[];
+  activities: JobActivityEvent[];
   emitter: EventEmitter;
   results: ProductResult[];
   jobDir: string;
@@ -117,6 +119,7 @@ export class ImageFinderJobManager {
       config,
       status,
       agents,
+      activities: [],
       emitter: new EventEmitter(),
       results: [],
       jobDir,
@@ -143,6 +146,7 @@ export class ImageFinderJobManager {
     record.emitter.on('event', onEvent);
     listener({ type: 'status', data: record.status });
     for (const agent of record.agents) listener({ type: 'agent', data: agent });
+    for (const activity of record.activities) listener({ type: 'activity', data: activity });
     return () => record.emitter.off('event', onEvent);
   }
 
@@ -211,11 +215,23 @@ export class ImageFinderJobManager {
                   url: action.url,
                 };
                 activeAgent.state = 'blocked';
+                emitActivity(record, group, activeRole, null, {
+                  phase: 'captcha',
+                  state: 'blocked',
+                  message: activeAgent.manualAction.message,
+                  reason: action.url,
+                });
                 emitAgent(record, activeAgent, 'captcha');
                 return;
               }
               activeAgent.manualAction = null;
               if (group.activeRole === activeRole) activeAgent.state = 'active';
+              emitActivity(record, group, activeRole, null, {
+                phase: 'captcha',
+                state: 'unblocked',
+                message: 'Google CAPTCHA resolved',
+                reason: action.url,
+              });
               emitAgent(record, activeAgent, activeRole);
             },
           }),
@@ -248,17 +264,33 @@ export class ImageFinderJobManager {
     let activeAgent = group.agents.query;
     const productDiagnostics: string[] = [];
     activateAgent(record, group, 'query', productLabel);
+    emitActivity(record, group, 'query', product, {
+      phase: 'product:start',
+      state: 'start',
+      message: `Starting ${productLabel}`,
+    });
 
     try {
       const allowedQueries = buildDeterministicQueries(product).slice(0, this.options.google.maxQueries);
       const { queries, diagnostics } = this.generateQueries(product, allowedQueries);
+      emitActivity(record, group, 'query', product, {
+        phase: 'query:build',
+        state: 'success',
+        message: `${queries.length} deterministic Google quer${queries.length === 1 ? 'y' : 'ies'} ready`,
+      });
       productDiagnostics.push(`queries=${queries.length}`, ...diagnostics);
       completeAgentStage(record, group.agents.query);
 
       activeAgent = group.agents.ranking;
       activateAgent(record, group, 'ranking', productLabel);
       const limit = record.config.limits?.maxCandidatesPerProduct ?? 5;
-      const { selected, diagnostics: rankingDiagnostics } = await this.selectRankedCandidates(group, product, queries, limit);
+      const { selected, diagnostics: rankingDiagnostics } = await this.selectRankedCandidates(
+        record,
+        group,
+        product,
+        queries,
+        limit,
+      );
       productDiagnostics.push(...rankingDiagnostics);
       completeAgentStage(record, group.agents.ranking);
 
@@ -267,7 +299,17 @@ export class ImageFinderJobManager {
 
       activeAgent = group.agents.metadata;
       activateAgent(record, group, 'metadata', productLabel);
+      emitActivity(record, group, 'metadata', product, {
+        phase: 'metadata:generate',
+        state: 'start',
+        message: `${product.emptyMetadataFields.length} metadata field${product.emptyMetadataFields.length === 1 ? '' : 's'}`,
+      });
       const metadata = await group.ai.generateMetadata(product, result.page, product.emptyMetadataFields);
+      emitActivity(record, group, 'metadata', product, {
+        phase: 'metadata:generate',
+        state: 'success',
+        message: 'Metadata generated',
+      });
       completeAgentStage(record, group.agents.metadata);
       const productResult: ProductResult = {
         sku: product.sku,
@@ -281,6 +323,13 @@ export class ImageFinderJobManager {
       record.results.push(productResult);
       record.status.totals.completed += 1;
       record.status.totals.pending -= 1;
+      emitActivity(record, group, 'metadata', product, {
+        phase: 'product:complete',
+        state: 'success',
+        imageCount: productResult.images.length,
+        reason: productResult.validationReason,
+        message: `${productResult.images.length} image${productResult.images.length === 1 ? '' : 's'} selected`,
+      });
       emitProduct(record, productResult);
       clearGroupAgents(record, group);
     } catch (error) {
@@ -297,6 +346,12 @@ export class ImageFinderJobManager {
       activeAgent.counts.failed += 1;
       activeAgent.lastError = message;
       activeAgent.state = 'error';
+      emitActivity(record, group, activeAgent.role, product, {
+        phase: 'product:failed',
+        state: 'error',
+        reason: message,
+        message: `Failed ${productLabel}`,
+      });
       emitAgent(record, activeAgent, activeAgent.role);
       record.status.totals.failed += 1;
       record.status.totals.pending -= 1;
@@ -320,6 +375,7 @@ export class ImageFinderJobManager {
   }
 
   private async selectRankedCandidates(
+    record: JobRecord,
     group: ModelAgentGroup,
     product: ProductInput,
     queries: string[],
@@ -330,8 +386,20 @@ export class ImageFinderJobManager {
     let rankedCandidates = 0;
 
     for (const query of queries) {
+      emitActivity(record, group, 'ranking', product, {
+        phase: 'ranking:search',
+        state: 'start',
+        query,
+        message: 'Searching Google',
+      });
       const candidates = await group.search.searchQuery(product, query);
       rankedCandidates += candidates.length;
+      emitActivity(record, group, 'ranking', product, {
+        phase: 'ranking:candidates',
+        state: candidates.length === 0 ? 'rejected' : 'progress',
+        query,
+        message: `${candidates.length} candidate${candidates.length === 1 ? '' : 's'} found`,
+      });
       if (candidates.length === 0) continue;
       for (const candidate of candidates) {
         if (selectedUrls.has(candidate.url)) continue;
@@ -343,8 +411,13 @@ export class ImageFinderJobManager {
     }
 
     if (selected.length === 0) {
-    throw new Error('Google search selected no candidates.');
+      throw new Error('Google search selected no candidates.');
     }
+    emitActivity(record, group, 'ranking', product, {
+      phase: 'ranking:candidates',
+      state: 'success',
+      message: `${selected.length} selected from ${rankedCandidates} ranked candidates`,
+    });
     return {
       selected,
       diagnostics: [`rankedCandidates=${rankedCandidates}`, `selectedCandidates=${selected.length}`],
@@ -367,32 +440,97 @@ export class ImageFinderJobManager {
     };
     for (const candidate of candidates) {
       try {
+        emitActivity(record, group, 'visual', product, {
+          phase: 'visual:extract',
+          state: 'start',
+          candidate,
+          message: 'Opening candidate page',
+        });
         const page = await group.search.extract(candidate);
         const evidence = scoreLocalProductEvidence(product, page);
         const imageCount = page.images.length;
+        emitActivity(record, group, 'visual', product, {
+          phase: 'visual:evidence',
+          state: 'progress',
+          candidate,
+          imageCount,
+          evidenceScore: evidence.score,
+          message: `${imageCount} image${imageCount === 1 ? '' : 's'}, evidence ${evidence.score}`,
+        });
         productDiagnostics.push(
           `candidate=${candidate.url} images=${imageCount} evidence=${evidence.score} title=${truncateDiagnostic(page.title || page.h1)}`,
         );
 
         if (imageCount === 0) {
+          emitActivity(record, group, 'visual', product, {
+            phase: 'visual:evidence',
+            state: 'rejected',
+            candidate,
+            imageCount,
+            evidenceScore: evidence.score,
+            reason: 'sem_imagem',
+            message: 'Candidate has no usable images',
+          });
           rejectCandidate(`${candidate.url} | sem_imagem`);
           continue;
         }
 
         if (evidence.score < LOCAL_EVIDENCE_THRESHOLD) {
+          emitActivity(record, group, 'visual', product, {
+            phase: 'visual:evidence',
+            state: 'rejected',
+            candidate,
+            imageCount,
+            evidenceScore: evidence.score,
+            reason: `evidencia_local_baixa=${evidence.score}`,
+            message: 'Local product evidence is too weak',
+          });
           rejectCandidate(`${candidate.url} | evidencia_local_baixa=${evidence.score}`);
           continue;
         }
 
+        emitActivity(record, group, 'visual', product, {
+          phase: 'visual:validate',
+          state: 'start',
+          candidate,
+          imageCount,
+          evidenceScore: evidence.score,
+          message: 'Validating with Gemini',
+        });
         const validation = await group.ai.validateProduct(product, page);
         if (validation.approved) {
+          emitActivity(record, group, 'visual', product, {
+            phase: 'visual:validate',
+            state: 'success',
+            candidate,
+            imageCount,
+            evidenceScore: evidence.score,
+            reason: validation.reason,
+            message: 'Gemini approved candidate',
+          });
           completeAgentStage(record, group.agents.visual);
           visualCompleted = true;
           return { page, reason: validation.reason };
         }
+        emitActivity(record, group, 'visual', product, {
+          phase: 'visual:validate',
+          state: 'rejected',
+          candidate,
+          imageCount,
+          evidenceScore: evidence.score,
+          reason: validation.reason,
+          message: 'Gemini rejected candidate',
+        });
         rejectCandidate(`${candidate.url} | gemini_reprovou=${truncateDiagnostic(validation.reason)}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        emitActivity(record, group, 'visual', product, {
+          phase: 'visual:extract',
+          state: 'error',
+          candidate,
+          reason: message,
+          message: 'Candidate extraction failed',
+        });
         rejectCandidate(`${candidate.url} | erro=${truncateDiagnostic(message)}`);
       }
     }
@@ -599,6 +737,32 @@ function emitAgent(record: JobRecord, agent: AgentStatus, stage: string): void {
 function emitProduct(record: JobRecord, result: ProductResult): void {
   record.emitter.emit('event', { type: 'product', data: result } satisfies JobEvent);
   record.emitter.emit('event', { type: 'status', data: record.status } satisfies JobEvent);
+}
+
+function emitActivity(
+  record: JobRecord,
+  group: ModelAgentGroup,
+  role: ModelAgentRole,
+  product: ProductInput | null,
+  activity: Omit<JobActivityEvent, 'id' | 'jobId' | 'timestamp' | 'apiKeyId' | 'agentId' | 'role' | 'product'>,
+): void {
+  const event: JobActivityEvent = {
+    id: crypto.randomUUID(),
+    jobId: record.id,
+    timestamp: new Date().toISOString(),
+    apiKeyId: group.apiKey.id,
+    agentId: group.agents[role].id,
+    role,
+    ...activity,
+  };
+  if (product) {
+    event.product = {
+      sku: product.sku,
+      title: product.title,
+    };
+  }
+  record.activities.push(event);
+  record.emitter.emit('event', { type: 'activity', data: event } satisfies JobEvent);
 }
 
 function emitStatus(record: JobRecord, state: JobStatus['state'], stage: string): void {

@@ -38,6 +38,49 @@ export interface JobStatus {
   error?: string;
 }
 
+export type JobActivityPhase =
+  | 'product:start'
+  | 'query:build'
+  | 'ranking:search'
+  | 'ranking:candidates'
+  | 'visual:extract'
+  | 'visual:evidence'
+  | 'visual:validate'
+  | 'metadata:generate'
+  | 'captcha'
+  | 'product:complete'
+  | 'product:failed';
+
+export type JobActivityState =
+  | 'start'
+  | 'progress'
+  | 'success'
+  | 'rejected'
+  | 'blocked'
+  | 'unblocked'
+  | 'error';
+
+export interface JobActivityEvent {
+  id: string;
+  jobId: string;
+  timestamp: string;
+  apiKeyId: string;
+  agentId: string;
+  role: ModelAgentRole;
+  product?: {
+    sku: string;
+    title: string;
+  };
+  phase: JobActivityPhase;
+  state: JobActivityState;
+  query?: string;
+  candidate?: SearchCandidate;
+  imageCount?: number;
+  evidenceScore?: number;
+  reason?: string;
+  message?: string;
+}
+
 export interface AgentStatus {
   id: string;
   label: string;

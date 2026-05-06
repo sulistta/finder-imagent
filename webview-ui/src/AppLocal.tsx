@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
+import {
+  type LocalAgentStatus,
+  type LocalJobActivityEvent,
+  LocalPipelineOffice,
+} from './components/LocalPipelineOffice.js';
+
 type MetadataColumnKey = 'description' | 'category' | 'seoTitle' | 'seoDescription' | 'seoKeywords';
 
 interface SheetPreview {
@@ -33,28 +39,6 @@ interface JobStatus {
   state: 'queued' | 'running' | 'completed' | 'failed';
 }
 
-interface AgentStatus {
-  id: string;
-  label: string;
-  role: ModelAgentRole;
-  model: string;
-  apiKeyId: string;
-  apiKeyLabel: string;
-  groupId: string;
-  state: 'idle' | 'active' | 'blocked' | 'error';
-  activeProduct: string | null;
-  manualAction: {
-    type: 'google-captcha';
-    message: string;
-    url: string;
-  } | null;
-  counts: {
-    completed: number;
-    failed: number;
-  };
-  lastError: string | null;
-}
-
 interface ProductResult {
   sku: string;
   status: 'completed' | 'failed' | 'skipped';
@@ -69,8 +53,6 @@ interface Health {
   models: Record<string, boolean>;
 }
 
-type ModelAgentRole = 'query' | 'ranking' | 'visual' | 'metadata';
-
 const metadataLabels: Record<MetadataColumnKey, string> = {
   description: 'Description',
   category: 'Category',
@@ -80,7 +62,6 @@ const metadataLabels: Record<MetadataColumnKey, string> = {
 };
 
 const metadataKeys = Object.keys(metadataLabels) as MetadataColumnKey[];
-const modelAgentRoles: ModelAgentRole[] = ['query', 'ranking', 'visual', 'metadata'];
 
 export default function AppLocal() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -95,7 +76,8 @@ export default function AppLocal() {
   const [targetImageCount, setTargetImageCount] = useState(4);
   const [maxProducts, setMaxProducts] = useState(0);
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
-  const [agents, setAgents] = useState<AgentStatus[]>([]);
+  const [agents, setAgents] = useState<LocalAgentStatus[]>([]);
+  const [activities, setActivities] = useState<LocalJobActivityEvent[]>([]);
   const [products, setProducts] = useState<ProductResult[]>([]);
   const [message, setMessage] = useState('');
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -125,6 +107,7 @@ export default function AppLocal() {
     setPreview(null);
     setJobStatus(null);
     setAgents([]);
+    setActivities([]);
     setProducts([]);
 
     const body = new FormData();
@@ -157,9 +140,10 @@ export default function AppLocal() {
       }),
     });
     if (!response.ok) throw new Error(await readError(response));
-    const payload = (await response.json()) as { status: JobStatus; agents: AgentStatus[] };
+    const payload = (await response.json()) as { status: JobStatus; agents: LocalAgentStatus[] };
     setJobStatus(payload.status);
     setAgents(payload.agents);
+    setActivities([]);
     setProducts([]);
     connectEvents(payload.status.id);
   }
@@ -174,8 +158,12 @@ export default function AppLocal() {
       if (status.state === 'completed' || status.state === 'failed') source.close();
     });
     source.addEventListener('agent', (event) => {
-      const nextAgent = JSON.parse(event.data) as AgentStatus;
+      const nextAgent = JSON.parse(event.data) as LocalAgentStatus;
       setAgents((current) => upsertById(current, nextAgent));
+    });
+    source.addEventListener('activity', (event) => {
+      const activity = JSON.parse(event.data) as LocalJobActivityEvent;
+      setActivities((current) => [...current.slice(-119), activity]);
     });
     source.addEventListener('product', (event) => {
       const result = JSON.parse(event.data) as ProductResult;
@@ -276,7 +264,7 @@ export default function AppLocal() {
               </a>
             )}
           </div>
-          <PixelOffice agents={agents} />
+          <LocalPipelineOffice agents={agents} activities={activities} products={products} />
         </div>
       </section>
 
@@ -370,74 +358,6 @@ function SelectField({
       </select>
     </label>
   );
-}
-
-function PixelOffice({ agents }: { agents: AgentStatus[] }) {
-  const groups = groupAgentsByApiKey(agents);
-  return (
-    <div className="pixel-office">
-      <div className="office-floor">
-        {groups.map((group, groupIndex) => (
-          <section className="agent-group" key={group.apiKeyId}>
-            <h3>{group.apiKeyLabel}</h3>
-            <div className="agent-group-grid">
-              {modelAgentRoles.map((role, roleIndex) => {
-                const agent = group.agents.find((item) => item.role === role);
-                if (!agent) return null;
-                const spriteIndex = (groupIndex * modelAgentRoles.length + roleIndex) % 6;
-                return (
-                  <div
-                    className={`agent-card ${agent.manualAction ? 'needs-manual-action' : ''} ${agent.state === 'active' ? 'is-active' : ''} ${agent.state === 'error' ? 'has-error' : ''}`}
-                    key={agent.id}
-                  >
-                    <div
-                      className={`sprite ${agent.manualAction ? 'sprite-waiting' : ''}`}
-                      style={{ backgroundImage: `url(/assets/characters/char_${spriteIndex}.png)` }}
-                    />
-                    <strong>{roleLabel(agent.role)}</strong>
-                    <span>{agent.model}</span>
-                    <b>{agent.manualAction ? 'waiting for CAPTCHA' : agent.activeProduct || agent.state}</b>
-                    {agent.manualAction && (
-                      <a className="manual-action" href={agent.manualAction.url} target="_blank" rel="noreferrer">
-                        {agent.manualAction.message}
-                      </a>
-                    )}
-                    {agent.lastError && <small>{agent.lastError}</small>}
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        ))}
-        {agents.length === 0 && (
-          <div className="empty-office">
-            Configure GOOGLE_API_KEYS and the four GEMINI_*_MODEL variables to seat model agents.
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function groupAgentsByApiKey(agents: AgentStatus[]): Array<{ apiKeyId: string; apiKeyLabel: string; agents: AgentStatus[] }> {
-  const byKey = new Map<string, { apiKeyId: string; apiKeyLabel: string; agents: AgentStatus[] }>();
-  for (const agent of agents) {
-    const group = byKey.get(agent.apiKeyId) ?? {
-      apiKeyId: agent.apiKeyId,
-      apiKeyLabel: agent.apiKeyLabel,
-      agents: [],
-    };
-    group.agents.push(agent);
-    byKey.set(agent.apiKeyId, group);
-  }
-  return [...byKey.values()];
-}
-
-function roleLabel(role: ModelAgentRole): string {
-  if (role === 'query') return 'Query';
-  if (role === 'ranking') return 'Ranking';
-  if (role === 'visual') return 'Visual';
-  return 'Metadata';
 }
 
 function ProgressPanel({ status }: { status: JobStatus | null }) {

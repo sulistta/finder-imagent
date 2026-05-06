@@ -6,8 +6,8 @@ import { describe, expect, it } from 'vitest';
 
 import type { AiProvider } from '../src/gemini.js';
 import type { SearchProvider } from '../src/google.js';
-import { ImageFinderJobManager } from '../src/jobManager.js';
-import type { ExtractedPage, ProductInput, SearchCandidate } from '../src/types.js';
+import { ImageFinderJobManager, type JobEvent } from '../src/jobManager.js';
+import type { ExtractedPage, JobActivityEvent, ProductInput, SearchCandidate } from '../src/types.js';
 import { previewWorkbook } from '../src/workbook.js';
 
 describe('ImageFinderJobManager', () => {
@@ -165,6 +165,53 @@ describe('ImageFinderJobManager', () => {
       sku: 'SKU-1',
       status: 'completed',
       diagnostics: expect.arrayContaining(['queryMode=deterministic', 'deterministicQueries=1']),
+    });
+  });
+
+  it('emits detailed activity events for the local product pipeline', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'image-finder-'));
+    const preview = await previewWorkbook({ rootDir }, await fixtureWorkbookBuffer(), 'fixture.xlsx');
+    const events: JobEvent[] = [];
+    const manager = createManager({
+      store: { rootDir },
+      apiKeys: [{ id: 'key-1', label: 'Google 1 (key:****)', key: 'secret-1' }],
+    });
+
+    const { status } = await manager.startJob(jobConfig(preview.workbookId));
+    const unsubscribe = manager.subscribe(status.id, (event) => events.push(event));
+
+    await waitForCompletion(manager, status.id);
+    unsubscribe();
+
+    const activities = events
+      .filter((event): event is JobEvent & { data: JobActivityEvent } => event.type === 'activity')
+      .map((event) => event.data);
+    expect(activities.map((event) => event.phase)).toEqual(
+      expect.arrayContaining([
+        'product:start',
+        'query:build',
+        'ranking:search',
+        'ranking:candidates',
+        'visual:extract',
+        'visual:evidence',
+        'visual:validate',
+        'metadata:generate',
+        'product:complete',
+      ]),
+    );
+    expect(activities.find((event) => event.phase === 'ranking:search')).toMatchObject({
+      role: 'ranking',
+      product: { sku: 'SKU-1', title: 'Printer toner' },
+      query: 'Printer toner',
+    });
+    expect(activities.find((event) => event.phase === 'visual:evidence')).toMatchObject({
+      role: 'visual',
+      imageCount: 1,
+      evidenceScore: expect.any(Number),
+    });
+    expect(activities.at(-1)).toMatchObject({
+      phase: 'product:complete',
+      state: 'success',
     });
   });
 
